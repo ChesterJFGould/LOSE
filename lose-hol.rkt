@@ -1,12 +1,15 @@
 #lang racket
 
-(require racket/trace)
+(require
+  racket/trace
+  syntax/id-table
+  "monads.rkt")
 (provide (all-defined-out))
 
 ;; type ::=
 ;;   | `sexpr
 ;;   | `prop
-;;   | `(=> ,type ,type)
+;;   | `(fun ,type ,type)
 ;;
 ;; x ::= variable?
 ;;
@@ -33,52 +36,229 @@
 ;;   | `⊥
 ;;   | `(,synth ,expr)
 
-(define (type? t)
-  (match t
-    [`sexpr #t]
-    [`prop #t]
-    [`(=> ,d ,c)
-      (and (type? d) (type? c))]
-    [_ #f]))
+(struct stx (loc))
+(define stx/c (struct/c stx srcloc?))
 
-(define (type=? t u)
-  (equal? t u))
+(struct sexpr ())
+(struct prop ())
+(struct fun (d c))
+(define type/c
+  (flat-rec-contract type/c
+    (struct/c sexpr)
+    (struct/c prop)
+    (struct/c fun type/c type/c)))
 
-(define (variable? x)
-  (and
-    (symbol? x)
-    (not (set-member? (set 'λ 'cons 'quote '= '∀ '∃ '-> 'and 'or 'sexpr 'prop '⊤ '⊥ '_) x))))
+(struct sexpr/stx stx ())
+(struct prop/stx stx ())
+(struct fun/stx stx (d c))
 
-(define (expr? e)
-  (or (check? e) (synth? e)))
+(struct static-error (loc))
 
-(define (check? e)
+(struct not-a-type static-error ())
+
+(define wf-type-error/c
+  (struct/c not-a-type srcloc?))
+
+(define/contract (wf-type s)
+  (-> stx/c (err/c wf-type-error/c type/c))
+  (match s
+    [(sexpr/stx _) (return/err (sexpr))]
+    [(prop/stx _) (return/err (prop))]
+    [(fun/stx _ d-stx c-stx)
+      (do/err
+        d <- (wf-type d-stx)
+        c <- (wf-type c-stx)
+        (return/err (fun d c)))]
+    [(stx loc) (raise/err (not-a-type loc))]))
+
+(define/contract (type=? t u)
+  (-> type/c type/c boolean?)
+  (match* (t u)
+    [((sexpr) (sexpr)) #t]
+    [((prop) (prop)) #t]
+    [((fun d-t c-t) (fun d-u c-u))
+      (and (type=? d-t d-u) (type=? c-t c-u))]
+    [(_ _) #f]))
+
+(struct lam/stx stx (x b))
+(struct var/stx stx (x))
+(struct sym/stx stx (s))
+(struct con/stx stx (c))
+(struct equ/stx stx (t))
+(struct all/stx stx (t))
+(struct exi/stx stx (t))
+(struct app/stx stx (f a))
+(struct ann/stx stx (e t))
+
+(struct lam (x b))
+(struct var (x))
+(struct sym (s))
+(struct con (c))
+(struct equ (t))
+(struct all (t))
+(struct exi (t))
+(struct app (f a))
+(struct ann (e t))
+
+(define (constant? c)
+  (set-member? (set `cons `empty `symbol? `-> `and `or `⊤ `⊥) c))
+
+(define/contract (constant-type c)
+  (-> constant? type/c)
+  (match c
+    [`cons (fun (sexpr) (fun (sexpr) (sexpr)))]
+    [`empty (sexpr)]
+    [`symbol? (fun (sexpr) (prop))]
+    [`-> (fun (prop) (fun (prop) (prop)))]
+    [`and (fun (prop) (fun (prop) (prop)))]
+    [`or (fun (prop) (fun (prop) (prop)))]
+    [`⊤ (prop)]
+    [`⊥ (prop)]))
+
+(define expr/c
+  (flat-rec-contract expr/c
+    (struct/c lam identifier? expr/c)
+    (struct/c var identifier?)
+    (struct/c sym symbol?)
+    (struct/c con constant?)
+    (struct/c equ type/c)
+    (struct/c all type/c)
+    (struct/c exi type/c)
+    (struct/c app expr/c expr/c)
+    (struct/c ann expr/c type/c)))
+
+;; TODO: Make this proper
+(define type-env/c dict?)
+
+(struct expected-but-has static-error (expected has))
+(struct expected-identifier static-error ())
+(struct expected-symbol static-error ())
+(struct expected-constant static-error ())
+(struct unbound-variable static-error ())
+(struct expected-non-function static-error (expected))
+(struct expected-function static-error (has))
+(struct cannot-synth static-error ())
+(struct invalid-expr static-error ())
+
+(define type-error/c
+  (or/c
+    wf-type-error/c
+    (struct/c expected-but-has srcloc? type/c type/c)
+    (struct/c expected-identifier srcloc?)
+    (struct/c expected-symbol srcloc?)
+    (struct/c expected-constant srcloc?)
+    (struct/c unbound-variable srcloc?)
+    (struct/c expected-non-function srcloc? type/c)
+    (struct/c expected-function srcloc? type/c)
+    (struct/c cannot-synth srcloc?)
+    (struct/c invalid-expr srcloc?)))
+
+(trace-define (check-type env e t)
+  (-> type-env/c stx/c type/c (err/c type-error/c expr/c))
+  (match* (e t)
+    [((lam/stx _ x b-stx) (fun d c))
+      (do/err
+        b <- (check-type (dict-set env x d) b-stx c)
+        (return/err (lam x b)))]
+    [((lam/stx loc _ _) t)
+      (raise/err (expected-non-function loc t))]
+    [(e-stx t)
+      (println e-stx)
+      (do/err
+        (cons e s) <- (synth-type env e-stx)
+        (if (type=? s t)
+          (return/err e)
+          (raise/err (expected-but-has (stx-loc e-stx) t s))))]))
+
+(define/contract (synth-type env e)
+  (-> type-env/c stx/c (err/c type-error/c (cons/c expr/c type/c)))
   (match e
-    [`(λ ,x ,b)
-      (and (variable? x) (expr? b))]
-    [_ #f]))
+    [(var/stx loc x)
+      (cond
+        [(not (identifier? x))
+          (raise/err (expected-identifier loc))]
+        [(not (dict-has-key? env x))
+          (raise/err (unbound-variable loc))]
+        [else
+          (return/err (cons (var x) (dict-ref env x)))])]
+    [(sym/stx loc s)
+      (cond
+        [(not (symbol? s))
+          (raise/err (expected-symbol loc))]
+        [else
+          (return/err (cons (sym s) (sexpr)))])]
+    [(con/stx loc c)
+      (cond
+        [(not (constant? c))
+          (raise/err (expected-constant loc))]
+        [else
+          (return/err (cons (con c) (constant-type c)))])]
+    [(equ/stx _ t-stx)
+      (do/err
+        t <- (wf-type t-stx)
+        (return/err (cons (equ t) (fun t (fun t (prop))))))]
+    [(all/stx _ t-stx)
+      (do/err
+        t <- (wf-type t-stx)
+        (return/err (cons (all t) (fun (fun t (prop)) (prop)))))]
+    [(exi/stx _ t-stx)
+      (do/err
+        t <- (wf-type t-stx)
+        (return/err (cons (exi t) (fun (fun t (prop)) (prop)))))]
+    [(app/stx _ f-stx a-stx)
+      (do/err
+        (cons f f-t) <- (synth-type env f-stx)
+        (match f-t
+          [(fun d c)
+            (do/err
+              a <- (check-type env a-stx d)
+              (return/err (cons (app f a) c)))]
+          [f-t
+            (raise/err (expected-function (stx-loc f-stx) f-t))]))]
+    [(ann/stx _ e-stx t-stx)
+      (do/err
+        t <- (wf-type t-stx)
+        e <- (check-type env e-stx t)
+        (return/err (cons e t)))]
+    [(lam/stx loc _ _)
+      (raise/err (cannot-synth loc))]
+    [(stx loc)
+      (raise/err (invalid-expr loc))]))
 
-(define (synth? e)
-  (match e
-    [(? variable?) #t]
-    [`cons #t]
-    [`(quote ,(? symbol?)) #t]
-    [`() #t]
-    [`symbol? #t]
-    [`pair? #t]
-    [`empty? #t]
-    [`(= ,t) (type? t)]
-    [`(∀ ,t) (type? t)]
-    [`(∃ ,t) (type? t)]
-    [`-> #t]
-    [`and #t]
-    [`or #t]
-    [`⊤ #t]
-    [`⊥ #t]
-    [`(,f ,arg)
-      (and (synth? f) (expr? arg))]
-    [_ #f]))
+(struct def/stx stx (x t e))
 
+(struct def (x t e))
+
+(define module-def/c
+  (struct/c def identifier? type/c expr/c))
+
+(struct invalid-module-def static-error ())
+
+(define wf-module-def-error/c
+  (or/c
+    type-error/c
+    wf-type-error/c
+    (struct/c invalid-module-def srcloc?)))
+
+(define/contract (wf-module-def env d)
+  (-> type-env/c stx/c (err/c wf-module-def-error/c module-def/c))
+  (match d
+    [(def/stx loc x t-stx e-stx)
+       (do/err
+         t <- (wf-type t-stx)
+         e <- (check-type env e-stx t)
+         (return/err (def x t e)))]
+    [(stx loc)
+      (raise/err (invalid-module-def loc))]))
+
+(define wf-module-error/c
+  wf-module-def-error/c)
+
+(define/contract (wf-module m)
+  (-> (listof stx/c) (err/c wf-module-error/c (listof module-def/c)))
+  (seq/err (map (λ (s) (wf-module-def (make-immutable-free-id-table) s)) m)))
+
+#|
 (define/contract (subst e x a)
   (-> expr? variable? expr? expr?)
   (match e
@@ -168,7 +348,7 @@
 (define/contract (type-check env e t)
   (-> type-env? expr? type? boolean?)
   (match* (e t)
-    [(`(λ ,x ,b) `(=> ,d ,c))
+    [(`(λ ,x ,b) `(fun ,d ,c))
      (type-check (dict-set env x d) b c)]
     [(`(λ ,_ ,_) _) #f]
     [(e t) (equal? t (type-synth env e))]))
@@ -177,23 +357,23 @@
   (-> type-env? expr? (or/c type? #f))
   (match e
     [(? variable? x) (dict-ref env x #f)]
-    [`cons `(=> sexpr (=> sexpr sexpr))]
+    [`cons `(fun sexpr (fun sexpr sexpr))]
     [`(quote ,_) `sexpr]
     [`() `sexpr]
-    [`symbol? `(=> sexpr prop)]
-    [`pair? `(=> sexpr prop)]
-    [`empty? `(=> sexpr prop)]
-    [`(= ,t) `(=> ,t (=> ,t prop))]
-    [`(∀ ,t) `(=> (=> ,t prop) prop)]
-    [`(∃ ,t) `(=> (=> ,t prop) prop)]
-    [`-> `(=> prop (=> prop prop))]
-    [`and `(=> prop (=> prop prop))]
-    [`or `(=> prop (=> prop prop))]
+    [`symbol? `(fun sexpr prop)]
+    [`pair? `(fun sexpr prop)]
+    [`empty? `(fun sexpr prop)]
+    [`(= ,t) `(fun ,t (fun ,t prop))]
+    [`(∀ ,t) `(fun (fun ,t prop) prop)]
+    [`(∃ ,t) `(fun (fun ,t prop) prop)]
+    [`-> `(fun prop (fun prop prop))]
+    [`and `(fun prop (fun prop prop))]
+    [`or `(fun prop (fun prop prop))]
     [`⊤ `prop]
     [`⊥ `prop]
     [`(,f ,arg)
       (match (type-synth env f)
-        [`(=> ,d ,c)
+        [`(fun ,d ,c)
           (and (type-check env arg d) c)]
         [_ #f])]))
 
@@ -271,7 +451,7 @@
 ;; -------------------- var
 ;; ,Γ | ,Θ |- ,x : ,p
 ;;
-;; ,Γ |- ,p : (=> sexpr prop)
+;; ,Γ |- ,p : (fun sexpr prop)
 ;; ,Γ | ,Θ |- ,empty : (,p `())
 ;; ,Γ | ,Θ |- ,sym : ((∀ sexpr) (λ x (-> (symbol? x) (,p x))))
 ;; ,Γ | ,Θ |- ,pair : ((∀ sexpr) (λ x ((∀ sexpr) (λ y (-> (and (,p x) (,p y)) (,p (cons ,x ,y)))))))
@@ -335,7 +515,7 @@
     [(prf prop)
      (cond
        [(proof-synth type-env proof-env prf)
-        =>
+        fun
         (λ (synthed-prop) (expr=? prop synthed-prop))]
        [else #f])]))
 
@@ -346,7 +526,7 @@
     #;
     [`(ind-sexpr ,p ,empty-p ,sym-p ,pair-p)
       (and 
-        (type-check type-env p `(=> sexpr prop))
+        (type-check type-env p `(fun sexpr prop))
         (proof-check type-env proof-env empty-p (app p `()))
         (let ([x (gensym)])
           (proof-check type-env proof-env sym-p `((∀ sexpr) (λ ,x ((-> (symbol? ,x)) ,(app p x))))))
@@ -396,7 +576,7 @@
       (match (proof-synth type-env proof-env =prf)
         [`(((= ,t) ,a) ,b)
           (and
-            (type-check type-env p `(=> ,t prop))
+            (type-check type-env p `(fun ,t prop))
             (proof-check type-env proof-env p-a (app p a))
             (app p b))]
         [_ #f])]
@@ -504,7 +684,7 @@
 (define default-proof-check-env
   (hash
     `sexpr-ind
-    `((∀ (=> sexpr prop))
+    `((∀ (fun sexpr prop))
        (λ P
          ((->
            ((and
@@ -572,3 +752,4 @@
   (check-true (expr? `⊤))
   (check-true (type-check (hash) `⊤ `prop))
 )
+|#

@@ -1,5 +1,5 @@
 #lang lose
 
-(define x prop ⊤)
+(define id (=> sexpr sexpr) (lam x x))
 
 (define y sexpr empty)
