@@ -3,7 +3,7 @@
 (require
   (for-syntax
     racket/trace
-    racket
+    (except-in racket raise-type-error)
     racket/syntax
     (except-in syntax/parse expr/c)
     syntax/transformer
@@ -14,6 +14,7 @@
 
 (provide
   #%app
+  #%expression
   (rename-out
     [module-begin #%module-begin]
     [my-define define]
@@ -22,7 +23,7 @@
     [fun-type =>]
     [empty-expr empty]
     [top-expr ⊤]
-    #;[var #%top]
+    [var #%top]
     [lam-expr lam]))
 
 (define eeyore (void))
@@ -34,8 +35,12 @@
 
   (define-syntax-class expanded-term
     #:attributes (body)
-    (pattern (~literal eeyore) #:attr body (begin (println 'eeyore-case) (println this-syntax) this-syntax))
-    (pattern (~var x identifier) #:attr body (begin (println #'x) (burden-eeyore (var/stx (syntax-srcloc #'x) #'x)))))
+    (pattern (~literal eeyore) #:attr body this-syntax)
+    (pattern ((~literal #%expression) e:expanded-term) #:attr body #'e.body)
+    (pattern ((~literal #%plain-app) f:expanded-term arg:expanded-term)
+      #:attr body
+      (burden-eeyore (app/stx (syntax-srcloc this-syntax) (unburden-eeyore #'f.body) (unburden-eeyore #'arg.body))))
+    (pattern (~var x identifier) #:attr body (burden-eeyore (var/stx (syntax-srcloc #'x) #'x))))
 
   (define (elab-to-syntax e)
     (syntax-parse (local-expand e 'expression '())
@@ -53,7 +58,7 @@
         ([defs (map elab-to-syntax (syntax->list #'(es ...)))]
          [racket-defs
            (run/err (wf-module defs)
-             (λ (err) (error "static error" err))
+             (λ (err) (raise-wf-module-error err))
              (λ (m) (list #`(provide x) #`(define x 10))))])
         #`(#%module-begin #,@racket-defs))]))
 
@@ -62,9 +67,8 @@
     [(_ x:id type expr)
      (burden-eeyore (def/stx (syntax-srcloc stx) #'x (elab-to-syntax #'type) (elab-to-syntax #'expr)))]))
 
-(define-syntax (sexpr-type stx)
-  (syntax-parse stx
-    [_ (burden-eeyore (sexpr/stx (syntax-srcloc stx)))]))
+(define-syntax sexpr-type
+  (make-variable-like-transformer (λ (stx) (burden-eeyore (sexpr/stx (syntax-srcloc stx))))))
 
 (define-syntax (prop-type stx)
   (syntax-parse stx
@@ -74,23 +78,19 @@
   (syntax-parse stx
     [(_ d-stx c-stx) (burden-eeyore (fun/stx (syntax-srcloc stx) (elab-to-syntax #'d-stx) (elab-to-syntax #'c-stx)))]))
 
-(define-syntax (empty-expr stx)
-  (syntax-parse stx
-    [_ (burden-eeyore (con/stx (syntax-srcloc stx) `empty))]))
+(define-syntax empty-expr
+  (make-variable-like-transformer (λ (stx) (burden-eeyore (con/stx (syntax-srcloc stx) `empty)))))
 
 (define-syntax (top-expr stx)
   (syntax-parse stx
     [_ (burden-eeyore (con/stx (syntax-srcloc stx) `⊤))]))
 
-;; TODO: Do scoping things?
 (define-syntax (lam-expr stx)
   (syntax-parse stx
     [(_ x:id b-stx)
      (define ctx (syntax-local-make-definition-context))
-     (syntax-local-bind-syntaxes (list #'x) #f ctx)
-     (internal-definition-context-add-scopes ctx #'x)
-     (define b^ (elab-to-syntax-ctx #'b-stx ctx))
-     (burden-eeyore (lam/stx (syntax-srcloc stx) #'x b^))]))
+     (match-define (list new-x) (syntax-local-bind-syntaxes (list #'x) #f ctx))
+     (burden-eeyore (lam/stx (syntax-srcloc stx) new-x (elab-to-syntax-ctx #'b-stx ctx)))]))
 
 (define-syntax (var stx)
   (syntax-parse stx

@@ -3,6 +3,7 @@
 (require
   racket/trace
   syntax/id-table
+  "pp-srcloc.rkt"
   "monads.rkt")
 (provide (all-defined-out))
 
@@ -54,10 +55,24 @@
 
 (struct static-error (loc))
 
+(define/contract (format-static-error err fmt . vals)
+  (->* ((struct/c static-error srcloc?) string?) #:rest any/c string?)
+  (match err
+    [(static-error loc)
+      (format "~a: ~a~n~a"
+        (srcloc->string loc)
+        (apply format fmt vals)
+        (pp-srcloc loc))]))
+
 (struct not-a-type static-error ())
 
 (define wf-type-error/c
   (struct/c not-a-type srcloc?))
+
+(define/contract (raise-wf-type-error e)
+  (-> wf-type-error/c none/c)
+  (match e
+    [(not-a-type loc) (raise-user-error (format-static-error e "not a type"))]))
 
 (define/contract (wf-type s)
   (-> stx/c (err/c wf-type-error/c type/c))
@@ -153,7 +168,34 @@
     (struct/c cannot-synth srcloc?)
     (struct/c invalid-expr srcloc?)))
 
-(trace-define (check-type env e t)
+(define/contract (raise-type-error e)
+  (-> type-error/c none/c)
+  (match e
+    [(expected-but-has loc expected has)
+      (raise-user-error
+        (format-static-error e "expected expression of type ~a, but has type ~a"
+          expected
+          has))]
+    [(expected-identifier loc)
+      (raise-user-error (format-static-error e "expected an identifier"))]
+    [(expected-symbol loc)
+      (raise-user-error (format-static-error e "expected a symbol"))]
+    [(expected-constant loc)
+      (raise-user-error (format-static-error e "expected a constant"))]
+    [(unbound-variable loc) (raise-user-error (format-static-error e "unbound variable"))]
+    [(expected-non-function loc expected)
+      (raise-user-error
+        (format-static-error e "expected expression of type ~a, but found a function" expected))]
+    [(expected-function loc has)
+      (raise-user-error
+        (format-static-error e "expected an expression of function type, but has type ~a" has))]
+    [(cannot-synth loc)
+      (raise-user-error (format-static-error e "cannot synthesize a type"))]
+    [(invalid-expr loc)
+      (raise-user-error (format-static-error e "invalid expression"))]
+    [e (raise-wf-type-error e)]))
+
+(define/contract (check-type env e t)
   (-> type-env/c stx/c type/c (err/c type-error/c expr/c))
   (match* (e t)
     [((lam/stx _ x b-stx) (fun d c))
@@ -163,7 +205,6 @@
     [((lam/stx loc _ _) t)
       (raise/err (expected-non-function loc t))]
     [(e-stx t)
-      (println e-stx)
       (do/err
         (cons e s) <- (synth-type env e-stx)
         (if (type=? s t)
@@ -237,8 +278,14 @@
 (define wf-module-def-error/c
   (or/c
     type-error/c
-    wf-type-error/c
     (struct/c invalid-module-def srcloc?)))
+
+(define/contract (raise-wf-module-def-error e)
+  (-> wf-module-def-error/c none/c)
+  (match e
+    [(invalid-module-def loc)
+      (raise-user-error (format-static-error e "invalid module-level definition"))]
+    [e (raise-type-error e)]))
 
 (define/contract (wf-module-def env d)
   (-> type-env/c stx/c (err/c wf-module-def-error/c module-def/c))
@@ -254,9 +301,24 @@
 (define wf-module-error/c
   wf-module-def-error/c)
 
+(define/contract (raise-wf-module-error e)
+  (-> wf-module-error/c none/c)
+  (raise-wf-module-def-error e))
+
 (define/contract (wf-module m)
   (-> (listof stx/c) (err/c wf-module-error/c (listof module-def/c)))
-  (seq/err (map (λ (s) (wf-module-def (make-immutable-free-id-table) s)) m)))
+  (let loop
+    ([env (make-immutable-free-id-table)]
+     [defs `()]
+     [m m])
+    (match m
+      [`() (return/err defs)]
+      [`(,def-stx ,defs-stx ...)
+        (do/err
+          d <- (wf-module-def env def-stx)
+          (match d
+            [(def x t e)
+             (loop (dict-set env x t) (append defs (list d)) defs-stx)]))])))
 
 #|
 (define/contract (subst e x a)

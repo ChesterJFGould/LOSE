@@ -8,7 +8,11 @@
   raise/err
   seq/err
   run/err
-  err/c)
+  err/c
+  return/or-false
+  bind/or-false
+  do/or-false
+  or-false/c)
 
 (define-syntax activate-monad-mode
   (syntax-rules ()
@@ -61,6 +65,21 @@
     [(err e) (err-case e)]
     [(ok a) (ok-case a)]))
 
-(define/contract (err/c e/c a/c)
-  (-> contract? contract? contract?)
+(define (err/c e/c a/c)
   (or/c (struct/c err e/c) (struct/c ok a/c)))
+
+;; (OrFalse A) is either A or #f
+
+;; A -> (OrFalse A)
+(define (return/or-false a) a)
+
+;; (OrFalse A) (A -> (OrFalse B)) -> (OrFalse B)
+(define (bind/or-false a f)
+  (if (eq? a #f)
+    #f
+    (f a)))
+
+(activate-monad-mode do/or-false return/or-false bind/or-false)
+
+(define (or-false/c a/c)
+  (or/c a/c #f))

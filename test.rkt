@@ -2,4 +2,4 @@
 
 (define id (=> sexpr sexpr) (lam x x))
 
-(define y sexpr empty)
+(define y sexpr (id empty))
