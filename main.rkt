@@ -21,10 +21,17 @@
     [sexpr-type sexpr]
     [prop-type prop]
     [fun-type =>]
+    [cons-expr cons]
     [empty-expr empty]
+    [symbol?-expr symbol?]
+    [->-expr ->]
+    [and-expr and]
+    [or-expr or]
     [top-expr ⊤]
+    [bot-expr ⊥]
     [var #%top]
-    [lam-expr lam]))
+    [lam-expr lam]
+    [sym-quote quote]))
 
 (define eeyore (void))
 
@@ -37,9 +44,16 @@
     #:attributes (body)
     (pattern (~literal eeyore) #:attr body this-syntax)
     (pattern ((~literal #%expression) e:expanded-term) #:attr body #'e.body)
-    (pattern ((~literal #%plain-app) f:expanded-term arg:expanded-term)
+    (pattern ((~literal #%plain-app) f:expanded-term arg:expanded-term args:expanded-term ...)
       #:attr body
-      (burden-eeyore (app/stx (syntax-srcloc this-syntax) (unburden-eeyore #'f.body) (unburden-eeyore #'arg.body))))
+      (burden-eeyore
+        (foldl
+          (λ (a f)
+            (app/stx (syntax-srcloc this-syntax)
+              f
+              (unburden-eeyore a)))
+          (app/stx (syntax-srcloc this-syntax) (unburden-eeyore #'f.body) (unburden-eeyore #'arg.body))
+          (syntax->list #'(args.body ...)))))
     (pattern (~var x identifier) #:attr body (burden-eeyore (var/stx (syntax-srcloc #'x) #'x))))
 
   (define (elab-to-syntax e)
@@ -49,6 +63,9 @@
   (define (elab-to-syntax-ctx e ctx)
     (syntax-parse (local-expand e 'expression '() ctx)
       [e:expanded-term (unburden-eeyore #'e.body)]))
+
+  (define (mk-constant c)
+    (make-variable-like-transformer (λ (stx) (burden-eeyore (c (syntax-srcloc stx))))))
 )
 
 (define-syntax (module-begin syn)
@@ -68,22 +85,38 @@
      (burden-eeyore (def/stx (syntax-srcloc stx) #'x (elab-to-syntax #'type) (elab-to-syntax #'expr)))]))
 
 (define-syntax sexpr-type
-  (make-variable-like-transformer (λ (stx) (burden-eeyore (sexpr/stx (syntax-srcloc stx))))))
+  (mk-constant (λ (loc) (sexpr/stx loc))))
 
-(define-syntax (prop-type stx)
-  (syntax-parse stx
-    [_ (burden-eeyore (prop/stx (syntax-srcloc stx)))]))
+(define-syntax prop-type
+  (mk-constant (λ (loc) (prop/stx loc))))
 
 (define-syntax (fun-type stx)
   (syntax-parse stx
     [(_ d-stx c-stx) (burden-eeyore (fun/stx (syntax-srcloc stx) (elab-to-syntax #'d-stx) (elab-to-syntax #'c-stx)))]))
 
-(define-syntax empty-expr
-  (make-variable-like-transformer (λ (stx) (burden-eeyore (con/stx (syntax-srcloc stx) `empty)))))
+(define-syntax cons-expr
+  (mk-constant (λ (loc) (con/stx loc `cons))))
 
-(define-syntax (top-expr stx)
-  (syntax-parse stx
-    [_ (burden-eeyore (con/stx (syntax-srcloc stx) `⊤))]))
+(define-syntax symbol?-expr
+  (mk-constant (λ (loc) (con/stx loc `symbol?))))
+
+(define-syntax empty-expr
+  (mk-constant (λ (loc) (con/stx loc `empty))))
+
+(define-syntax ->-expr
+  (mk-constant (λ (loc) (con/stx loc `->))))
+
+(define-syntax and-expr
+  (mk-constant (λ (loc) (con/stx loc `and))))
+
+(define-syntax or-expr
+  (mk-constant (λ (loc) (con/stx loc `or))))
+
+(define-syntax top-expr
+  (mk-constant (λ (loc) (con/stx loc `⊤))))
+
+(define-syntax bot-expr
+  (mk-constant (λ (loc) (con/stx loc `⊥))))
 
 (define-syntax (lam-expr stx)
   (syntax-parse stx
@@ -95,3 +128,7 @@
 (define-syntax (var stx)
   (syntax-parse stx
     [(_ . x:id) (burden-eeyore (var/stx (syntax-srcloc stx) #'x))]))
+
+(define-syntax (sym-quote stx)
+  (syntax-parse stx
+    [(_ s:identifier) (burden-eeyore (sym/stx (syntax-srcloc stx) (syntax-e #'s)))]))

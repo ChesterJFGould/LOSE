@@ -1,5 +1,9 @@
 #lang lose
 
-(define id (=> sexpr sexpr) (lam x x))
+(define my-cons (=> sexpr (=> sexpr sexpr)) cons)
 
-(define y sexpr (id empty))
+(define x sexpr (cons empty empty))
+
+(define x-symbol? prop (symbol? x))
+
+(define s sexpr 'lambda)
