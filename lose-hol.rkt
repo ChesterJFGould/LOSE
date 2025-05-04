@@ -274,22 +274,28 @@
   (struct/c def identifier? type/c expr/c))
 
 (struct invalid-module-def static-error ())
+(struct multiple-definition-for-name static-error ())
 
 (define wf-module-def-error/c
   (or/c
     type-error/c
-    (struct/c invalid-module-def srcloc?)))
+    (struct/c invalid-module-def srcloc?)
+    (struct/c multiple-definition-for-name srcloc?)))
 
 (define/contract (raise-wf-module-def-error e)
   (-> wf-module-def-error/c none/c)
   (match e
     [(invalid-module-def loc)
       (raise-user-error (format-static-error e "invalid module-level definition"))]
+    [(multiple-definition-for-name loc)
+      (raise-user-error (format-static-error e "a top-level binding for this name already exists"))]
     [e (raise-type-error e)]))
 
 (define/contract (wf-module-def env d)
   (-> type-env/c stx/c (err/c wf-module-def-error/c module-def/c))
   (match d
+    [(def/stx loc x _ _) #:when (dict-has-key? env x)
+      (raise/err (multiple-definition-for-name loc))]
     [(def/stx loc x t-stx e-stx)
        (do/err
          t <- (wf-type t-stx)

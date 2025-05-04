@@ -30,7 +30,12 @@
     [top-expr ⊤]
     [bot-expr ⊥]
     [var #%top]
-    [lam-expr lam]
+    [lam-expr λ]
+    [equ-expr =]
+    [all-expr forall]
+    [better-forall ∀]
+    [exi-expr exists]
+    [better-exists ∃]
     [sym-quote quote]))
 
 (define eeyore (void))
@@ -132,3 +137,29 @@
 (define-syntax (sym-quote stx)
   (syntax-parse stx
     [(_ s:identifier) (burden-eeyore (sym/stx (syntax-srcloc stx) (syntax-e #'s)))]))
+
+(define-syntax (equ-expr stx)
+  (syntax-parse stx
+    [(_ t) (burden-eeyore (equ/stx (syntax-srcloc stx) (elab-to-syntax #'t)))]))
+
+(define-syntax (all-expr stx)
+  (syntax-parse stx
+    [(_ t) (burden-eeyore (all/stx (syntax-srcloc stx) (elab-to-syntax #'t)))]))
+
+(define-syntax (exi-expr stx)
+  (syntax-parse stx
+    [(_ t) (burden-eeyore (exi/stx (syntax-srcloc stx) (elab-to-syntax #'t)))]))
+
+(define-syntax (app-helper stx)
+  (syntax-parse stx
+    [(_ f a) (burden-eeyore (app/stx (syntax-srcloc stx) (elab-to-syntax #'f) (elab-to-syntax #'a)))]))
+
+(define-syntax better-exists
+  (syntax-rules (:)
+    [(_ [x : t] b)
+      (app-helper (exi-expr t) (lam-expr x b))]))
+
+(define-syntax better-forall
+  (syntax-rules (:)
+    [(_ [x : t] b)
+      (app-helper (all-expr t) (lam-expr x b))]))
