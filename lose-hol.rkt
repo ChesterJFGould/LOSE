@@ -3,6 +3,7 @@
 (require
   racket/trace
   syntax/id-table
+  racket/generic
   "pp-srcloc.rkt"
   "monads.rkt")
 (provide (all-defined-out))
@@ -40,9 +41,26 @@
 (struct stx (loc))
 (define stx/c (struct/c stx srcloc?))
 
-(struct sexpr ())
-(struct prop ())
-(struct fun (d c))
+(struct sexpr ()
+  #:methods gen:custom-write
+  [(define (write-proc e port mode)
+     (write-string "sexpr" port))])
+(struct prop ()
+  #:methods gen:custom-write
+  [(define (write-proc e port mode)
+     (write-string "prop" port))])
+(struct fun (d c)
+  #:methods gen:custom-write
+  ;; TODO: Respect mode here
+  [(define/generic ^write-proc write-proc)
+   (define (write-proc e port mode)
+     (match e
+       [(fun d c)
+        (write-string "(=> " port)
+        (^write-proc d port mode)
+        (write-string " " port)
+        (^write-proc c port mode)
+        (write-string ")" port)]))])
 (define type/c
   (flat-rec-contract type/c
     (struct/c sexpr)
@@ -104,9 +122,10 @@
 (struct exi/stx stx (t))
 (struct app/stx stx (f a))
 (struct ann/stx stx (e t))
+(struct hole/stx stx ())
 
 (struct lam (x b))
-(struct var (x))
+(struct vbl (x))
 (struct sym (s))
 (struct con (c))
 (struct equ (t))
@@ -133,7 +152,7 @@
 (define expr/c
   (flat-rec-contract expr/c
     (struct/c lam identifier? expr/c)
-    (struct/c var identifier?)
+    (struct/c vbl identifier?)
     (struct/c sym symbol?)
     (struct/c con constant?)
     (struct/c equ type/c)
@@ -142,8 +161,69 @@
     (struct/c app expr/c expr/c)
     (struct/c ann expr/c type/c)))
 
+(struct env-def (type value)
+  #:methods gen:custom-write
+  ;; TODO: Respect mode here
+  [(define/generic ^write-proc write-proc)
+   (define (write-proc e port mode)
+     (match e
+       [(env-def t _)
+        (write-string ": " port)
+        (^write-proc t port mode)]))])
+;; TODO: Consider making just using env-def bound to the variable itself instead
+;;   Would act sort of like a substitution then?
+(struct env-param (type)
+  #:methods gen:custom-write
+  ;; TODO: Respect mode here
+  [(define/generic ^write-proc write-proc)
+   (define (write-proc e port mode)
+     (match e
+       [(env-param t)
+        (write-string ": " port)
+        (^write-proc t port mode)]))])
+;; A type-env is a dict with identifier? keys and (or/c env-def? env-param? any/c) values
 ;; TODO: Make this proper
 (define type-env/c dict?)
+
+(define/contract (type-env->string env)
+  (-> type-env/c string?)
+  (for/fold
+    ([s ""])
+    ([(v t) (in-dict env)])
+    (format "~a~n~a ~a" s (identifier-binding-symbol v) t)))
+
+(define/contract ((canonical/c env type) expr)
+  (-> type-env/c type/c (-> any/c boolean?))
+  (match* (expr type)
+    [((lam (? identifier? x) b) (fun d c))
+      ((canonical/c (dict-set env x (env-param d)) c) b)]
+    [(expr (or (sexpr) (prop)))
+      (do/or-false
+        s <- ((atomic/c env) expr)
+        (return/or-false (type=? s type)))]
+    [(_ _) #f]))
+
+(define/contract ((atomic/c env) expr)
+  (-> type-env/c (-> any/c (or/c #f type/c)))
+  (match expr
+    [(vbl x)
+      (match (dict-ref env x #f)
+       [(env-param t) t]
+       [_ #f])]
+    [(sym _) (sexpr)]
+    [(con c) (constant-type c)]
+    [(equ t) (fun t (fun t (prop)))]
+    [(all t) (fun (fun t (prop)) (prop))]
+    [(exi t) (fun (fun t (prop)) (prop))]
+    [(app f a)
+      (do/or-false
+        t <- ((atomic/c env) f)
+        (match t
+          [(fun d c)
+            (do/or-false
+              ((canonical/c env d) a)
+              (return/or-false c))]
+          [_ #f]))]))
 
 (struct expected-but-has static-error (expected has))
 (struct expected-identifier static-error ())
@@ -154,6 +234,8 @@
 (struct expected-function static-error (has))
 (struct cannot-synth static-error ())
 (struct invalid-expr static-error ())
+(struct hole-check-type static-error (env expected))
+(struct hole-synth-type static-error (env))
 
 (define type-error/c
   (or/c
@@ -166,7 +248,9 @@
     (struct/c expected-non-function srcloc? type/c)
     (struct/c expected-function srcloc? type/c)
     (struct/c cannot-synth srcloc?)
-    (struct/c invalid-expr srcloc?)))
+    (struct/c invalid-expr srcloc?)
+    (struct/c hole-check-type srcloc? type-env/c type/c)
+    (struct/c hole-synth-type srcloc? type-env/c)))
 
 (define/contract (raise-type-error e)
   (-> type-error/c none/c)
@@ -193,74 +277,97 @@
       (raise-user-error (format-static-error e "cannot synthesize a type"))]
     [(invalid-expr loc)
       (raise-user-error (format-static-error e "invalid expression"))]
+    [(hole-check-type loc env expected)
+      (raise-user-error
+        (format "~a~nBindings in scope:~a"
+          (format-static-error e "found hole with expected type ~a" expected)
+          (type-env->string env)))]
+    [(hole-synth-type loc env)
+      (raise-user-error
+        (format "~a~nBindings in scope:~a"
+          (format-static-error e "found hole")
+          (type-env->string env)))]
     [e (raise-wf-type-error e)]))
 
 (define/contract (check-type env e t)
-  (-> type-env/c stx/c type/c (err/c type-error/c expr/c))
+  (->i
+    ([env type-env/c]
+     [e stx/c]
+     [t type/c])
+    [result (env e t) (err/c type-error/c (canonical/c env t))])
   (match* (e t)
     [((lam/stx _ x b-stx) (fun d c))
       (do/err
-        b <- (check-type (dict-set env x d) b-stx c)
+        b <- (check-type (dict-set env x (env-param d)) b-stx c)
         (return/err (lam x b)))]
     [((lam/stx loc _ _) t)
       (raise/err (expected-non-function loc t))]
+    [((hole/stx loc) t)
+      (raise/err (hole-check-type loc env t))]
     [(e-stx t)
       (do/err
-        (cons e s) <- (synth-type env e-stx)
+        (cons s e) <- (synth-type env e-stx)
         (if (type=? s t)
           (return/err e)
           (raise/err (expected-but-has (stx-loc e-stx) t s))))]))
 
 (define/contract (synth-type env e)
-  (-> type-env/c stx/c (err/c type-error/c (cons/c expr/c type/c)))
+  (->i
+    ([env type-env/c]
+     [e stx/c])
+    [result (env e)
+      (err/c
+        type-error/c
+        (cons/dc [t type/c] [e (t) (canonical/c env t)]))])
   (match e
     [(var/stx loc x)
-      (cond
-        [(not (identifier? x))
-          (raise/err (expected-identifier loc))]
-        [(not (dict-has-key? env x))
-          (raise/err (unbound-variable loc))]
-        [else
-          (return/err (cons (var x) (dict-ref env x)))])]
+      (match (dict-ref env x #f)
+        [(env-param t)
+          (return/err (cons t (vbl x)))]
+        [(env-def t v)
+          (return/err (cons t v))]
+        [#f (raise/err (unbound-variable loc))])]
+     [(hole/stx loc)
+       (raise/err (hole-synth-type loc env))]
     [(sym/stx loc s)
       (cond
         [(not (symbol? s))
           (raise/err (expected-symbol loc))]
         [else
-          (return/err (cons (sym s) (sexpr)))])]
+          (return/err (cons (sexpr) (sym s)))])]
     [(con/stx loc c)
       (cond
         [(not (constant? c))
           (raise/err (expected-constant loc))]
         [else
-          (return/err (cons (con c) (constant-type c)))])]
+          (return/err (cons (constant-type c) (con c)))])]
     [(equ/stx _ t-stx)
       (do/err
         t <- (wf-type t-stx)
-        (return/err (cons (equ t) (fun t (fun t (prop))))))]
+        (return/err (cons (fun t (fun t (prop))) (equ t))))]
     [(all/stx _ t-stx)
       (do/err
         t <- (wf-type t-stx)
-        (return/err (cons (all t) (fun (fun t (prop)) (prop)))))]
+        (return/err (cons (fun (fun t (prop)) (prop)) (all t))))]
     [(exi/stx _ t-stx)
       (do/err
         t <- (wf-type t-stx)
-        (return/err (cons (exi t) (fun (fun t (prop)) (prop)))))]
+        (return/err (cons (fun (fun t (prop)) (prop)) (exi t))))]
     [(app/stx _ f-stx a-stx)
       (do/err
-        (cons f f-t) <- (synth-type env f-stx)
+        (cons f-t f) <- (synth-type env f-stx)
         (match f-t
           [(fun d c)
             (do/err
               a <- (check-type env a-stx d)
-              (return/err (cons (app f a) c)))]
+              (return/err (cons c (app f a))))]
           [f-t
             (raise/err (expected-function (stx-loc f-stx) f-t))]))]
     [(ann/stx _ e-stx t-stx)
       (do/err
         t <- (wf-type t-stx)
         e <- (check-type env e-stx t)
-        (return/err (cons e t)))]
+        (return/err (cons t e)))]
     [(lam/stx loc _ _)
       (raise/err (cannot-synth loc))]
     [(stx loc)
@@ -324,7 +431,14 @@
           d <- (wf-module-def env def-stx)
           (match d
             [(def x t e)
-             (loop (dict-set env x t) (append defs (list d)) defs-stx)]))])))
+             (loop (dict-set env x (env-param t)) (append defs (list d)) defs-stx)]))])))
+
+(struct ∀I/stx (x x-proof))
+(struct ∀E/stx (∀-proof expr))
+(struct ∃I/stx (witness witness-proof))
+(struct ∃E/stx (∃-proof x-witness x-proof body-proof))
+(struct =I/stx ()) ;; Refl
+(struct =E/stx (=-proof prop prop-a))
 
 #|
 (define/contract (subst e x a)

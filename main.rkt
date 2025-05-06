@@ -3,8 +3,7 @@
 (require
   (for-syntax
     racket/trace
-    (except-in racket raise-type-error)
-    racket/syntax
+    (except-in racket raise-type-error) racket/syntax
     (except-in syntax/parse expr/c)
     syntax/transformer
     syntax/stx
@@ -35,6 +34,8 @@
     [all-expr forall]
     [better-forall ∀]
     [exi-expr exists]
+    [hole _]
+    [ann-expr the]
     [better-exists ∃]
     [sym-quote quote]))
 
@@ -123,6 +124,9 @@
 (define-syntax bot-expr
   (mk-constant (λ (loc) (con/stx loc `⊥))))
 
+(define-syntax hole
+  (mk-constant (λ (loc) (hole/stx loc))))
+
 (define-syntax (lam-expr stx)
   (syntax-parse stx
     [(_ x:id b-stx)
@@ -149,6 +153,10 @@
 (define-syntax (exi-expr stx)
   (syntax-parse stx
     [(_ t) (burden-eeyore (exi/stx (syntax-srcloc stx) (elab-to-syntax #'t)))]))
+
+(define-syntax (ann-expr stx)
+  (syntax-parse stx
+    [(_ t e) (burden-eeyore (ann/stx (syntax-srcloc stx) (elab-to-syntax #'e) (elab-to-syntax #'t)))]))
 
 (define-syntax (app-helper stx)
   (syntax-parse stx

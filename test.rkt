@@ -1,6 +1,6 @@
 #lang lose
 
-(define my-cons (=> sexpr (=> sexpr sexpr)) cons)
+(define my-cons (=> sexpr (=> sexpr sexpr)) (λ x (λ y (cons x y))))
 
 (define x sexpr (cons empty empty))
 
@@ -14,4 +14,4 @@
   (∃ [x : sexpr] (∀ [y : sexpr] ((= sexpr) x y))))
 
 (define true-duh prop
-  ((forall sexpr) (λ x ((exists sexpr) (λ y ((= sexpr) x y))))))
+  (∀ [x : sexpr] (∃ [y : sexpr] ((= sexpr) x y))))
