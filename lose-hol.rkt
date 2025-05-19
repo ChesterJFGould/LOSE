@@ -225,6 +225,78 @@
               (return/or-false c))]
           [_ #f]))]))
 
+(define (canonical=? a b)
+  ;; (canonical/c env a) (canonical/c env a) -> boolean?
+  (define (canonical=? l env-a env-b a b)
+    ;; natural? (dictof identifier? natural?) (canonical/c env a) (canonical/c env a) -> boolean?
+    (match* (a b)
+      [((lam x a) (lam y b))
+        (canonical=?
+          (+ l 1)
+          (dict-set env-a x l)
+          (dict-set env-b y l)
+          a
+          b)]
+      [((lam _ _) _) #f]
+      [(_ (lam _ _)) #f]
+      [(a b) (atomic=? l env-a env-b a b)]))
+  (define (atomic=? l env-a env-b a b)
+    (match* (a b)
+      [((vbl x) (vbl y)) #:when (and (dict-has-key? env-a x) (dict-has-key? env-b y))
+       (= (dict-ref env-a x) (dict-ref env-b y))]
+      [((vbl x) (vbl y)) (free-identifier=? x y)]
+      [((sym s) (sym t)) (symbol=? s t)]
+      [((con c) (con d)) (symbol=? c d)]
+      [((equ _) (equ _)) #t]
+      [((all _) (all _)) #t]
+      [((exi _) (exi _)) #t]
+      [((app f a) (app g b))
+        (and
+          (atomic=? l env-a env-b f g)
+          (canonical=? l env-a env-b a b))]
+      [(_ _) #f]))
+  (canonical=? 0 (make-immutable-free-id-table) (make-immutable-free-id-table) a b))
+
+(define (do-app f a)
+  ;; (canonical/c env (fun d c)) (canonical/c env d) -> (canonical/c env c)
+  (match f
+    [(lam x b) (hereditary-subst/n b x a)]))
+
+(define (head-identifier=? a x)
+  ;; (atomic/c env a) identifier? -> boolean?
+  (match a
+    [(app f _) (head-identifier=? a x)]
+    [(vbl y) (free-identifier=? x y)]
+    [_ #f]))
+
+;; a[x := v]
+(define (hereditary-subst/n a x v)
+  ;; (canonical/c env a) identifier? (canonical/c env b) -> (canonical/c env a)
+  (match a
+    [(lam y b)
+     (lam y (hereditary-subst/n b x v))]
+    [a #:when (head-identifier=? a x)
+     (hereditary-subst/rn a x v)]
+    [a
+     (hereditary-subst/rr a x v)]))
+
+(define (hereditary-subst/rn a x v)
+  ;; (head-identifier=? a x) must be true
+  ;; (atomic/c env a) identifier? (canonical/c env b) -> (canonical/c env a)
+  (match a
+    ;; These are the only two cases since we assume (head-identifier=? a x is true)
+    [(vbl _) v] ;; Since we assume (head-identifier=? a x) is true, this must be x
+    [(app f a)
+      (do-app (hereditary-subst/rn f x v) (hereditary-subst/n a x v))]))
+
+(define (hereditary-subst/rr a x v)
+  ;; (head-identifier=? a x) must be false
+  ;; (atomic/c env a) identifier? (canonical/c env b) -> (atomic/c env a)
+  (match a
+    [(app f a)
+     (app (hereditary-subst/rr f x v) (hereditary-subst/n a x v))]
+    [a a]))
+
 (struct expected-but-has static-error (expected has))
 (struct expected-identifier static-error ())
 (struct expected-symbol static-error ())
@@ -360,7 +432,7 @@
           [(fun d c)
             (do/err
               a <- (check-type env a-stx d)
-              (return/err (cons c (app f a))))]
+              (return/err (cons c (do-app f a))))]
           [f-t
             (raise/err (expected-function (stx-loc f-stx) f-t))]))]
     [(ann/stx _ e-stx t-stx)
@@ -433,12 +505,40 @@
             [(def x t e)
              (loop (dict-set env x (env-param t)) (append defs (list d)) defs-stx)]))])))
 
-(struct ∀I/stx (x x-proof))
-(struct ∀E/stx (∀-proof expr))
-(struct ∃I/stx (witness witness-proof))
-(struct ∃E/stx (∃-proof x-witness x-proof body-proof))
-(struct =I/stx ()) ;; Refl
-(struct =E/stx (=-proof prop prop-a))
+(struct ∀I/stx stx (x x-proof))
+(struct ∀E/stx stx (∀-proof expr))
+(struct ∃I/stx stx (witness witness-proof))
+(struct ∃E/stx stx (∃-proof x-witness x-proof body-proof))
+(struct =I/stx stx ()) ;; Refl
+(struct =E/stx stx (=-proof prop prop-a))
+
+(struct ∀I (x x-proof))
+(struct ∀E (∀-proof expr))
+(struct ∃I (witness witness-proof))
+(struct ∃E (∃-proof x-witness x-proof body-proof))
+(struct =I ()) ;; Refl
+(struct =E (=-proof prop prop-a))
+
+(struct env-thm (prop))
+
+;; A proof-env is a dict with identifier? keys and (or/c env-def? env-param? env-thm? any/c) values
+;; TODO: Make this proper
+(define proof-env/c dict?)
+
+(define/contract ((proves-check/c env p) proof)
+  (->i
+    ([env proof-env/c]
+     [p (env) (canonical/c env (prop))])
+    [result (env p) (-> any/c boolean?)])
+  (match* (proof p)
+    [((∀I x proof) (app (all t) p))
+     ((proves-check/c (dict-set env x (env-param t)) (do-app p (vbl x))) proof)]
+    [((∃I w proof) (app (exi t) p))
+     (and
+       ((canonical/c env t) w)
+       ((proves-check/c env (do-app p w)) proof))]
+    [((=I) (app (app (equ t) a) b))
+     (canonical=? a b)]))
 
 #|
 (define/contract (subst e x a)
