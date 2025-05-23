@@ -1,6 +1,7 @@
 #lang racket
 
 (require
+  racket/syntax
   racket/trace
   syntax/id-table
   racket/generic
@@ -223,7 +224,8 @@
             (do/or-false
               ((canonical/c env d) a)
               (return/or-false c))]
-          [_ #f]))]))
+          [_ #f]))]
+    [_ #f]))
 
 (define (canonical=? a b)
   ;; (canonical/c env a) (canonical/c env a) -> boolean?
@@ -265,9 +267,17 @@
 (define (head-identifier=? a x)
   ;; (atomic/c env a) identifier? -> boolean?
   (match a
-    [(app f _) (head-identifier=? a x)]
+    [(app f _) (head-identifier=? f x)]
     [(vbl y) (free-identifier=? x y)]
     [_ #f]))
+
+(define (eta-expand t a)
+  ;; (t : type/c) (atomic/c env t) -> (canonical/c env t)
+  (match t
+    [(fun d c)
+     (let ([x (generate-temporary 'x)])
+       (lam x (eta-expand c (app a (eta-expand d x)))))]
+    [t a]))
 
 ;; a[x := v]
 (define (hereditary-subst/n a x v)
@@ -361,6 +371,8 @@
           (type-env->string env)))]
     [e (raise-wf-type-error e)]))
 
+
+
 (define/contract (check-type env e t)
   (->i
     ([env type-env/c]
@@ -395,7 +407,7 @@
     [(var/stx loc x)
       (match (dict-ref env x #f)
         [(env-param t)
-          (return/err (cons t (vbl x)))]
+          (return/err (cons t (eta-expand t (vbl x))))]
         [(env-def t v)
           (return/err (cons t v))]
         [#f (raise/err (unbound-variable loc))])]
@@ -412,19 +424,22 @@
         [(not (constant? c))
           (raise/err (expected-constant loc))]
         [else
-          (return/err (cons (constant-type c) (con c)))])]
+          (return/err (cons (constant-type c) (eta-expand (constant-type c) (con c))))])]
     [(equ/stx _ t-stx)
       (do/err
         t <- (wf-type t-stx)
-        (return/err (cons (fun t (fun t (prop))) (equ t))))]
+        let type = (fun t (fun t (prop)))
+        (return/err (cons type (eta-expand type (equ t)))))]
     [(all/stx _ t-stx)
       (do/err
         t <- (wf-type t-stx)
-        (return/err (cons (fun (fun t (prop)) (prop)) (all t))))]
+        let type = (fun (fun t (prop)) (prop))
+        (return/err (cons type (eta-expand type (all t)))))]
     [(exi/stx _ t-stx)
       (do/err
         t <- (wf-type t-stx)
-        (return/err (cons (fun (fun t (prop)) (prop)) (exi t))))]
+        let type = (fun (fun t (prop)) (prop))
+        (return/err (cons type (eta-expand type (exi t)))))]
     [(app/stx _ f-stx a-stx)
       (do/err
         (cons f-t f) <- (synth-type env f-stx)
