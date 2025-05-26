@@ -259,6 +259,7 @@
       [(_ _) #f]))
   (canonical=? 0 (make-immutable-free-id-table) (make-immutable-free-id-table) a b))
 
+#;
 (define (do-app f a)
   ;; (canonical/c env (fun d c)) (canonical/c env d) -> (canonical/c env c)
   (match f
@@ -306,6 +307,143 @@
     [(app f a)
      (app (hereditary-subst/rr f x v) (hereditary-subst/n a x v))]
     [a a]))
+
+(struct env-val (type value))
+
+(define/contract ((check/c env t) e)
+  (-> type-env/c type/c (-> any/c boolean?))
+  (match* (t e)
+    [((fun d c) (lam x b))
+      ((check/c (dict-set env x (env-val d (vbl x))) c) b)]
+    [(t e)
+      (do/or-false
+        s <- ((synth/c env) e)
+        (return/or-false (type=? t s)))]))
+
+(define/contract ((synth/c env) e)
+  (-> type-env/c (-> any/c (or/c type/c #f)))
+  (match e
+    [(vbl (? identifier? x))
+      (match (dict-ref env x #f)
+        [(env-val t _) t]
+        [_ #f])]
+    [(sym (? symbol?)) (sexpr)]
+    [(con (? constant? c)) (constant-type c)]
+    [(equ (? type/c t)) (fun t (fun t (prop)))]
+    [(all (? type/c t)) (fun (fun t (prop)) (prop))]
+    [(exi (? type/c t)) (fun (fun t (prop)) (prop))]
+    [(ann e (? type/c t))
+      (do/or-false
+        ((check/c env t) e)
+        (return/or-false t))]
+    [(app f a)
+      (do/or-false
+        f-t <- ((synth/c env) f)
+        (match f-t
+          [(fun d c)
+            (do/or-false
+              ((check/c env d) a)
+              (return/or-false c))]
+          [_ #f]))]
+    [_ #f]))
+
+(define/contract ((value/c env t) v)
+  (-> type-env/c type/c (-> any/c boolean?))
+  (match* (t v)
+    [((fun d c) (? procedure? f))
+      (let ([x (generate-temporary 'x)])
+        ((value/c (dict-set env x (env-val d (vbl x))) c) (f (vbl x))))]
+    [(t n)
+     (do/or-false
+       s <- ((neu/c env) n)
+       (return/or-false (type=? t s)))]))
+
+(define/contract ((neu/c env) n)
+  (-> type-env/c (-> any/c (or/c type/c #f)))
+  (match n
+    [(vbl x)
+      (match (dict-ref env x #f)
+        [(env-val t (vbl (? identifier? y)))
+         (and (free-identifier=? x y) t)]
+        [_ #f])]
+    [(sym _) (sexpr)]
+    [(con c) (constant-type c)]
+    [(equ t) (fun t (fun t (prop)))]
+    [(all t) (fun (fun t (prop)) (prop))]
+    [(exi t) (fun (fun t (prop)) (prop))]
+    [(app f a)
+      (do/or-false
+        f-t <- ((neu/c env) f)
+        (match f-t
+          [(fun d c)
+            (do/or-false
+              ((value/c env d) a)
+              (return/or-false c))]
+          [_ #f]))]
+    [_ #f]))
+
+(struct env-eval (value))
+
+(define/contract (eval/check env t e)
+  (->i
+    ([env type-env/c]
+     [t (env) type/c]
+     [e (env t) (check/c env t)])
+    [v (env t e) (value/c env t)])
+  (eval/expr env e))
+
+(define (eval/expr env e)
+  ;; type-env/c (check/c env t) -> (value/c env t)
+  (match e
+    [(lam x b)
+     (λ (x-v) (eval/expr (dict-set env x (env-eval x-v)) b))]
+    [(app f a) (do-app (eval/expr env f) (eval/expr env a))]
+    [(ann e _) (eval/expr env e)]
+    [(vbl x)
+      (match (dict-ref env x)
+        [(env-val _ v) v]
+        [(env-eval v) v])]
+    [n n]))
+
+(define (do-app f a)
+  ;; (value/c env (fun d c)) (value/c env d) -> (value/c env c)
+  (match f
+    [(? procedure? f) (f a)]
+    [f (app f a)]))
+
+(define (value=? a b)
+  ;; (value/c env t) (value/c env t) -> boolean?
+  (match* (a b)
+    [((? procedure? f) g)
+     (let ([x (generate-temporary 'x)])
+       (value=? (do-app f x) (do-app g x)))]
+    [(f (? procedure? g))
+     (let ([x (generate-temporary 'x)])
+       (value=? (do-app f x) (do-app g x)))]
+    [((vbl x) (vbl y)) (free-identifier=? x y)]
+    [((sym s) (sym t)) (symbol=? s t)]
+    [((con c) (con d)) (symbol=? c d)]
+    [((equ _) (equ _)) #t]
+    [((all _) (all _)) #t]
+    [((exi _) (exi _)) #t]
+    [((app f a) (app g b))
+     (and (value=? f g) (value=? a b))]
+    [(_ _) #f]))
+
+;; TODO: Why even bother reading back into canonical?
+;;   We should just decide equality on values
+; (define (quote/value env v)
+;   ;; (env : type-env/c) (t : type) (value/c env t) -> (canonical/c env t)
+;   (match t
+;     [(fun d c)
+;      (let ([x (generate-temporary 'x)])
+;        (lam x (quote/value (dict-set env x (env-val d x)) c (do-app v x))))]
+;     [t
+; 
+; (define (quote/neu env n)
+;   ;; (env : type-env/c) (neu/c env t) -> (atomic/c env t)
+;   (match n
+;     [(app f a) (app (quote/neu env f) (quote/value env 
 
 (struct expected-but-has static-error (expected has))
 (struct expected-identifier static-error ())
@@ -372,17 +510,16 @@
     [e (raise-wf-type-error e)]))
 
 
-
 (define/contract (check-type env e t)
   (->i
     ([env type-env/c]
      [e stx/c]
      [t type/c])
-    [result (env e t) (err/c type-error/c (canonical/c env t))])
+    [result (env e t) (err/c type-error/c (check/c env t))])
   (match* (e t)
     [((lam/stx _ x b-stx) (fun d c))
       (do/err
-        b <- (check-type (dict-set env x (env-param d)) b-stx c)
+        b <- (check-type (dict-set env x (env-val d (vbl x))) b-stx c)
         (return/err (lam x b)))]
     [((lam/stx loc _ _) t)
       (raise/err (expected-non-function loc t))]
@@ -402,15 +539,14 @@
     [result (env e)
       (err/c
         type-error/c
-        (cons/dc [t type/c] [e (t) (canonical/c env t)]))])
+        (cons/dc [t type/c] [e (t) (check/c env t)]))])
   (match e
     [(var/stx loc x)
       (match (dict-ref env x #f)
-        [(env-param t)
-          (return/err (cons t (eta-expand t (vbl x))))]
-        [(env-def t v)
-          (return/err (cons t v))]
-        [#f (raise/err (unbound-variable loc))])]
+        [(env-val t _)
+         (return/err (cons t (vbl x)))]
+        [#f
+         (raise/err (unbound-variable loc))])]
      [(hole/stx loc)
        (raise/err (hole-synth-type loc env))]
     [(sym/stx loc s)
@@ -424,22 +560,22 @@
         [(not (constant? c))
           (raise/err (expected-constant loc))]
         [else
-          (return/err (cons (constant-type c) (eta-expand (constant-type c) (con c))))])]
+          (return/err (cons (constant-type c) (con c)))])]
     [(equ/stx _ t-stx)
       (do/err
         t <- (wf-type t-stx)
         let type = (fun t (fun t (prop)))
-        (return/err (cons type (eta-expand type (equ t)))))]
+        (return/err (cons type (equ t))))]
     [(all/stx _ t-stx)
       (do/err
         t <- (wf-type t-stx)
         let type = (fun (fun t (prop)) (prop))
-        (return/err (cons type (eta-expand type (all t)))))]
+        (return/err (cons type(all t))))]
     [(exi/stx _ t-stx)
       (do/err
         t <- (wf-type t-stx)
         let type = (fun (fun t (prop)) (prop))
-        (return/err (cons type (eta-expand type (exi t)))))]
+        (return/err (cons type(exi t))))]
     [(app/stx _ f-stx a-stx)
       (do/err
         (cons f-t f) <- (synth-type env f-stx)
@@ -447,25 +583,120 @@
           [(fun d c)
             (do/err
               a <- (check-type env a-stx d)
-              (return/err (cons c (do-app f a))))]
+              (return/err (cons c (app f a))))]
           [f-t
             (raise/err (expected-function (stx-loc f-stx) f-t))]))]
     [(ann/stx _ e-stx t-stx)
       (do/err
         t <- (wf-type t-stx)
         e <- (check-type env e-stx t)
-        (return/err (cons t e)))]
+        (return/err (cons t (ann e t))))]
     [(lam/stx loc _ _)
       (raise/err (cannot-synth loc))]
     [(stx loc)
       (raise/err (invalid-expr loc))]))
 
+(struct ∀I/stx stx (x x-proof))
+(struct ∀E/stx stx (∀-proof expr))
+(struct ∃I/stx stx (witness witness-proof))
+(struct ∃E/stx stx (∃-proof x-witness x-proof body-proof))
+(struct =I/stx stx ()) ;; Refl
+(struct =E/stx stx (=-proof prop prop-a))
+
+(struct ∀I (x x-proof))
+(struct ∀E (∀-proof expr))
+(struct ∃I (witness witness-proof))
+(struct ∃E (∃-proof x-witness x-proof body-proof))
+(struct =I ()) ;; Refl
+(struct =E (=-proof prop proof-a))
+
+(define proof/c
+  (flat-rec-contract proof/c
+    (struct/c ∀I identifier? proof/c)
+    (struct/c ∀E proof/c expr/c)
+    (struct/c ∃I expr/c proof/c)
+    (struct/c ∃E proof/c identifier? identifier? proof/c)
+    (struct/c =I)
+    (struct/c =E proof/c expr/c proof/c)))
+
+(struct env-prf (prop))
+
+;; A proof-env is a dict with identifier? keys and (or/c env-val? env-thm? any/c) values
+;; TODO: Make this proper
+(define proof-env/c dict?)
+
+(struct doesnt-prove static-error (prop))
+(struct objs-not-equal static-error (a b prop))
+
+(define proof-error/c
+  (or/c
+    type-error/c
+    (struct/c doesnt-prove srcloc? any/c #|(value/c env (prop))|#)
+    (struct/c objs-not-equal srcloc? any/c any/c #|(value/c env t)|# any/c #|(value/c env (prop))|#)))
+
+(define/contract (raise-proof-error e)
+  (-> proof-error/c none/c)
+  (match e
+    [(doesnt-prove loc p)
+     (raise-user-error (format-static-error e "proof doesn't prove proposition ~a" p))]
+    [(objs-not-equal loc a b p)
+     (raise-user-error (format-static-error e "failed to prove ~a since ~a and ~a are not equal" p a b))]
+    [e (raise-type-error e)]))
+
+(define/contract ((proves-check/c env p) proof)
+  (->i
+    ([env proof-env/c]
+     [p (env) (value/c env (prop))])
+    [result (env p) (-> any/c boolean?)])
+  (match* (proof p)
+    [((∀I x proof) (app (all t) p))
+     ((proves-check/c (dict-set env x (env-val t (vbl x))) (do-app p (vbl x))) proof)]
+    [((∃I w proof) (app (exi t) p))
+     (and
+       ((check/c env t) w)
+       ((proves-check/c env (do-app p w)) proof))]
+    [((=I) (app (app (equ t) a) b))
+     (value=? a b)]
+    [(_ _) #f]))
+
+(define/contract (check-proof env prf p)
+  (->i
+    ([env proof-env/c]
+     [prf stx/c]
+     [p (env) (value/c env (prop))])
+    [res (env prf p) (err/c proof-error/c (proves-check/c env p))])
+  (match* (prf p)
+    [((∀I/stx _ x prf-stx) (app (all t) p))
+     (do/err
+       prf <- (check-proof (dict-set env x (env-val t (vbl x))) prf-stx (do-app p (vbl x)))
+       (return/err (∀I x prf)))]
+    [((∀I/stx loc _ _) p)
+     (raise/err (doesnt-prove loc p))]
+    [((∃I/stx loc w-stx prf-stx) (app (exi t) p))
+     (do/err
+       w <- (check-type env w-stx t)
+       let w-v = (eval/check env t w)
+       prf <- (check-proof env prf-stx (do-app p w-v))
+       (return/err (∃I w prf)))]
+    [((∃I/stx loc _ _) p)
+     (raise/err (doesnt-prove loc p))]
+    [((=I/stx loc) (app (app (equ t) a) b))
+     (if (value=? a b)
+       (return/err (=I))
+       (raise/err (objs-not-equal loc a b p)))]
+    [((=I/stx loc) p)
+     (raise/err (doesnt-prove loc p))]))
+
 (struct def/stx stx (x t e))
+(struct def-prf/stx stx (x p e))
 
 (struct def (x t e))
+(struct def-prf (x p e))
 
 (define module-def/c
-  (struct/c def identifier? type/c expr/c))
+  (or/c
+    (struct/c def identifier? type/c expr/c)
+    (struct/c def-prf identifier? expr/c proof/c)))
 
 (struct invalid-module-def static-error ())
 (struct multiple-definition-for-name static-error ())
@@ -473,6 +704,7 @@
 (define wf-module-def-error/c
   (or/c
     type-error/c
+    proof-error/c
     (struct/c invalid-module-def srcloc?)
     (struct/c multiple-definition-for-name srcloc?)))
 
@@ -483,18 +715,26 @@
       (raise-user-error (format-static-error e "invalid module-level definition"))]
     [(multiple-definition-for-name loc)
       (raise-user-error (format-static-error e "a top-level binding for this name already exists"))]
-    [e (raise-type-error e)]))
+    [e (raise-proof-error e)]))
 
 (define/contract (wf-module-def env d)
   (-> type-env/c stx/c (err/c wf-module-def-error/c module-def/c))
   (match d
     [(def/stx loc x _ _) #:when (dict-has-key? env x)
-      (raise/err (multiple-definition-for-name loc))]
+     (raise/err (multiple-definition-for-name loc))]
     [(def/stx loc x t-stx e-stx)
-       (do/err
-         t <- (wf-type t-stx)
-         e <- (check-type env e-stx t)
-         (return/err (def x t e)))]
+     (do/err
+       t <- (wf-type t-stx)
+       e <- (check-type env e-stx t)
+       (return/err (def x t e)))]
+    [(def-prf/stx loc x _ _) #:when (dict-has-key? env x)
+     (raise/err (multiple-definition-for-name loc))]
+    [(def-prf/stx loc x p-stx prf-stx)
+     (do/err
+       p <- (check-type env p-stx (prop))
+       let p-v = (eval/check env (prop) p)
+       prf <- (check-proof env prf-stx p-v)
+       (return/err (def-prf x p prf)))]
     [(stx loc)
       (raise/err (invalid-module-def loc))]))
 
@@ -518,42 +758,15 @@
           d <- (wf-module-def env def-stx)
           (match d
             [(def x t e)
-             (loop (dict-set env x (env-param t)) (append defs (list d)) defs-stx)]))])))
-
-(struct ∀I/stx stx (x x-proof))
-(struct ∀E/stx stx (∀-proof expr))
-(struct ∃I/stx stx (witness witness-proof))
-(struct ∃E/stx stx (∃-proof x-witness x-proof body-proof))
-(struct =I/stx stx ()) ;; Refl
-(struct =E/stx stx (=-proof prop prop-a))
-
-(struct ∀I (x x-proof))
-(struct ∀E (∀-proof expr))
-(struct ∃I (witness witness-proof))
-(struct ∃E (∃-proof x-witness x-proof body-proof))
-(struct =I ()) ;; Refl
-(struct =E (=-proof prop prop-a))
-
-(struct env-thm (prop))
-
-;; A proof-env is a dict with identifier? keys and (or/c env-def? env-param? env-thm? any/c) values
-;; TODO: Make this proper
-(define proof-env/c dict?)
-
-(define/contract ((proves-check/c env p) proof)
-  (->i
-    ([env proof-env/c]
-     [p (env) (canonical/c env (prop))])
-    [result (env p) (-> any/c boolean?)])
-  (match* (proof p)
-    [((∀I x proof) (app (all t) p))
-     ((proves-check/c (dict-set env x (env-param t)) (do-app p (vbl x))) proof)]
-    [((∃I w proof) (app (exi t) p))
-     (and
-       ((canonical/c env t) w)
-       ((proves-check/c env (do-app p w)) proof))]
-    [((=I) (app (app (equ t) a) b))
-     (canonical=? a b)]))
+             (loop
+               (dict-set env x (env-val t (vbl x)))
+               (append defs (list d))
+               defs-stx)]
+            [(def-prf x p prf)
+             (loop
+               (dict-set env x (env-prf p))
+               (append defs (list d))
+               defs-stx)]))])))
 
 #|
 (define/contract (subst e x a)

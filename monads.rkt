@@ -29,9 +29,9 @@
 
 ;; Err E A is either (err E) or (ok A)
 
-(struct err (val))
+(struct err (val) #:transparent)
 
-(struct ok (val))
+(struct ok (val) #:transparent)
 
 ;; A -> Err E A
 (define (return/err a)

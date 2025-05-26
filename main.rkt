@@ -17,6 +17,7 @@
   (rename-out
     [module-begin #%module-begin]
     [my-define define]
+    [defthm defthm]
     [sexpr-type sexpr]
     [prop-type prop]
     [fun-type =>]
@@ -37,6 +38,9 @@
     [hole _]
     [ann-expr the]
     [better-exists ∃]
+    [∀I-expr ∀I]
+    [∃I-expr ∃I]
+    [=I-expr =I]
     [sym-quote quote]))
 
 (define eeyore (void))
@@ -90,6 +94,11 @@
     [(_ x:id type expr)
      (burden-eeyore (def/stx (syntax-srcloc stx) #'x (elab-to-syntax #'type) (elab-to-syntax #'expr)))]))
 
+(define-syntax (defthm stx)
+  (syntax-parse stx
+    [(_ x:id p prf)
+     (burden-eeyore (def-prf/stx (syntax-srcloc stx) #'x (elab-to-syntax #'p) (elab-to-syntax #'prf)))]))
+
 (define-syntax sexpr-type
   (mk-constant (λ (loc) (sexpr/stx loc))))
 
@@ -133,6 +142,21 @@
      (define ctx (syntax-local-make-definition-context))
      (match-define (list new-x) (syntax-local-bind-syntaxes (list #'x) #f ctx))
      (burden-eeyore (lam/stx (syntax-srcloc stx) new-x (elab-to-syntax-ctx #'b-stx ctx)))]))
+
+(define-syntax (∀I-expr stx)
+  (syntax-parse stx
+    [(_ x:id prf-stx)
+     (define ctx (syntax-local-make-definition-context))
+     (match-define (list new-x) (syntax-local-bind-syntaxes (list #'x) #f ctx))
+     (burden-eeyore (∀I/stx (syntax-srcloc stx) new-x (elab-to-syntax-ctx #'prf-stx ctx)))]))
+
+(define-syntax (∃I-expr stx)
+  (syntax-parse stx
+    [(_ w-stx prf-stx)
+     (burden-eeyore (∃I/stx (syntax-srcloc stx) (elab-to-syntax #'w-stx) (elab-to-syntax #'prf-stx)))]))
+
+(define-syntax =I-expr
+  (mk-constant (λ (loc) (=I/stx loc))))
 
 (define-syntax (var stx)
   (syntax-parse stx
