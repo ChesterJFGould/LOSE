@@ -78,10 +78,10 @@
   (->* ((struct/c static-error srcloc?) string?) #:rest any/c string?)
   (match err
     [(static-error loc)
-      (format "~a: ~a~n~a"
-        (srcloc->string loc)
-        (apply format fmt vals)
-        (pp-srcloc loc))]))
+     (format "~a: ~a~n~a"
+       (srcloc->string loc)
+       (apply format fmt vals)
+       (pp-srcloc loc))]))
 
 (struct not-a-type static-error ())
 
@@ -125,15 +125,51 @@
 (struct ann/stx stx (e t))
 (struct hole/stx stx ())
 
-(struct lam (x b))
-(struct vbl (x))
-(struct sym (s))
-(struct con (c))
-(struct equ (t))
-(struct all (t))
-(struct exi (t))
-(struct app (f a))
-(struct ann (e t))
+(struct lam (x b)
+  #:methods gen:custom-write
+  [(define (write-proc e port mode)
+     (match e
+       [(lam x a) (fprintf port "(λ ~a ~a)" (syntax-e x) a)]))])
+(struct vbl (x)
+  #:methods gen:custom-write
+  [(define (write-proc e port mode)
+     (match e
+       [(vbl x) (fprintf port "~a" (syntax-e x))]))])
+(struct sym (s)
+  #:methods gen:custom-write
+  [(define (write-proc e port mode)
+     (match e
+       [(sym s) (fprintf port "'~a" s)]))])
+(struct con (c)
+  #:methods gen:custom-write
+  [(define (write-proc e port mode)
+     (match e
+       [(con s) (fprintf port "~a" s)]))])
+(struct equ (t)
+  #:methods gen:custom-write
+  [(define (write-proc e port mode)
+     (match e
+       [(equ t) (fprintf port "(= ~a)" t)]))])
+(struct all (t)
+  #:methods gen:custom-write
+  [(define (write-proc e port mode)
+     (match e
+       [(all t) (fprintf port "(∀ ~a)" t)]))])
+(struct exi (t)
+  #:methods gen:custom-write
+  [(define (write-proc e port mode)
+     (match e
+       [(exi t) (fprintf port "(∃ ~a)" t)]))])
+(struct app (f a)
+  #:methods gen:custom-write
+  [(define (write-proc e port mode)
+     (match e
+       [(app f a) (fprintf port "(~a ~a)" f a)]))])
+(struct ann (e t)
+  #:methods gen:custom-write
+  [(define (write-proc e port mode)
+     (match e
+       [(ann e t) (fprintf port "(the ~a ~a)" t e)]))])
 
 (define (constant? c)
   (set-member? (set `cons `empty `symbol? `-> `and `or `⊤ `⊥) c))
@@ -308,7 +344,15 @@
      (app (hereditary-subst/rr f x v) (hereditary-subst/n a x v))]
     [a a]))
 
-(struct env-val (type value))
+(struct env-val (type value)
+  #:methods gen:custom-write
+  ;; TODO: Respect mode here
+  [(define/generic ^write-proc write-proc)
+   (define (write-proc e port mode)
+     (match e
+       [(env-val t _)
+        (write-string ": " port)
+        (^write-proc t port mode)]))])
 
 (define/contract ((check/c env t) e)
   (-> type-env/c type/c (-> any/c boolean?))
@@ -429,6 +473,15 @@
     [((app f a) (app g b))
      (and (value=? f g) (value=? a b))]
     [(_ _) #f]))
+
+(define (quote/value v)
+  (match v
+    [(? procedure? f)
+     (let ([x (generate-temporary 'x)])
+       (lam x (f (vbl x))))]
+    [(app f a)
+     (app (quote/value f) (quote/value a))]
+    [n n]))
 
 ;; TODO: Why even bother reading back into canonical?
 ;;   We should just decide equality on values
@@ -619,7 +672,16 @@
     (struct/c =I)
     (struct/c =E proof/c expr/c proof/c)))
 
-(struct env-prf (prop))
+(struct env-prf (prop)
+  #:methods gen:custom-write
+  ;; TODO: Respect mode here
+  [(define/generic ^write-proc write-proc)
+   (define (write-proc e port mode)
+     (match e
+       [(env-prf p)
+        ;; TODO: "⊢" is maybe not the best symbol here? I just want something other than ":" to distinguish objects from proofs
+        (write-string "⊢ " port)
+        (^write-proc p port mode)]))])
 
 ;; A proof-env is a dict with identifier? keys and (or/c env-val? env-thm? any/c) values
 ;; TODO: Make this proper
@@ -627,12 +689,14 @@
 
 (struct doesnt-prove static-error (prop))
 (struct objs-not-equal static-error (a b prop))
+(struct hole-check-proof static-error (env prop))
 
 (define proof-error/c
   (or/c
     type-error/c
     (struct/c doesnt-prove srcloc? any/c #|(value/c env (prop))|#)
-    (struct/c objs-not-equal srcloc? any/c any/c #|(value/c env t)|# any/c #|(value/c env (prop))|#)))
+    (struct/c objs-not-equal srcloc? any/c any/c #|(value/c env t)|# any/c #|(value/c env (prop))|#)
+    (struct/c hole-check-proof srcloc? type-env/c any/c)))
 
 (define/contract (raise-proof-error e)
   (-> proof-error/c none/c)
@@ -641,6 +705,11 @@
      (raise-user-error (format-static-error e "proof doesn't prove proposition ~a" p))]
     [(objs-not-equal loc a b p)
      (raise-user-error (format-static-error e "failed to prove ~a since ~a and ~a are not equal" p a b))]
+    [(hole-check-proof loc env prop)
+      (raise-user-error
+        (format "~a~nBindings in scope:~a"
+          (format-static-error e "found hole when trying to prove ~a" (quote/value prop))
+          (type-env->string env)))]
     [e (raise-type-error e)]))
 
 (define/contract ((proves-check/c env p) proof)
@@ -685,7 +754,9 @@
        (return/err (=I))
        (raise/err (objs-not-equal loc a b p)))]
     [((=I/stx loc) p)
-     (raise/err (doesnt-prove loc p))]))
+     (raise/err (doesnt-prove loc p))]
+    [((hole/stx loc) p)
+     (raise/err (hole-check-proof loc env p))]))
 
 (struct def/stx stx (x t e))
 (struct def-prf/stx stx (x p e))
@@ -759,7 +830,7 @@
           (match d
             [(def x t e)
              (loop
-               (dict-set env x (env-val t (vbl x)))
+               (dict-set env x (env-val t (eval/check env t e)))
                (append defs (list d))
                defs-stx)]
             [(def-prf x p prf)

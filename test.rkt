@@ -16,8 +16,8 @@
 (define true-duh prop
   (∀ [x : sexpr] (∃ [y : sexpr] ((= sexpr) x y))))
 
-(defthm true-duh-proof (∀ [x : sexpr] (∃ [y : sexpr] ((= sexpr) x y)))
+(defthm true-duh-proof true-duh
   (∀I x (∃I x =I)))
 
 (defthm sexpr-refl (∀ [x : sexpr] ((= sexpr) x x))
-  (∀I x =I))
+  (∀I y =I))
