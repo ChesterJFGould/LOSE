@@ -41,6 +41,9 @@
     [∀I-expr ∀I]
     [∃I-expr ∃I]
     [=I-expr =I]
+    [->I-expr ->I]
+    [andI-expr andI]
+    [ind-sexpr-expr ind-sexpr]
     [sym-quote quote]))
 
 (define eeyore (void))
@@ -158,6 +161,22 @@
 (define-syntax =I-expr
   (mk-constant (λ (loc) (=I/stx loc))))
 
+(define-syntax (->I-expr stx)
+  (syntax-parse stx
+    [(_ x:id prf-stx)
+     (define ctx (syntax-local-make-definition-context))
+     (match-define (list new-x) (syntax-local-bind-syntaxes (list #'x) #f ctx))
+     (burden-eeyore (->I/stx (syntax-srcloc stx) new-x (elab-to-syntax-ctx #'prf-stx ctx)))]))
+
+(define-syntax (andI-expr stx)
+  (syntax-parse stx
+    [(_ a b) (burden-eeyore (andI/stx (syntax-srcloc stx) (elab-to-syntax #'a) (elab-to-syntax #'b)))]))
+
+(define-syntax (ind-sexpr-expr stx)
+  (syntax-parse stx
+    [(_ p empty-prf symbol-prf cons-prf)
+     (burden-eeyore (ind-sexpr/stx (syntax-srcloc stx) (elab-to-syntax #'p) (elab-to-syntax #'empty-prf) (elab-to-syntax #'symbol-prf) (elab-to-syntax #'cons-prf)))]))
+
 (define-syntax (var stx)
   (syntax-parse stx
     [(_ . x:id) (burden-eeyore (var/stx (syntax-srcloc stx) #'x))]))
@@ -193,5 +212,7 @@
 
 (define-syntax better-forall
   (syntax-rules (:)
+    [(_ [x : t] [y : s] b ...)
+     (app-helper (all-expr t) (lam-expr x (better-forall [y : s] b ...)))]
     [(_ [x : t] b)
       (app-helper (all-expr t) (lam-expr x b))]))

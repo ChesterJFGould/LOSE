@@ -20,4 +20,4 @@
   (∀I x (∃I x =I)))
 
 (defthm sexpr-refl (∀ [x : sexpr] ((= sexpr) x x))
-  (∀I y =I))
+  (∀I y _))

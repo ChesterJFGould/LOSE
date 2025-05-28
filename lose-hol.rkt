@@ -9,36 +9,6 @@
   "monads.rkt")
 (provide (all-defined-out))
 
-;; type ::=
-;;   | `sexpr
-;;   | `prop
-;;   | `(fun ,type ,type)
-;;
-;; x ::= variable?
-;;
-;; expr ::=
-;;   | check
-;;   | synth
-;;
-;; check ::=
-;;   | `(λ ,x ,expr)
-;;
-;; synth ::=
-;;   | x
-;;   | `cons
-;;   | `(quote ,symbol?)
-;;   | `()
-;;   | `symbol?
-;;   | `(= ,type)
-;;   | `(∀ ,type)
-;;   | `(∃ ,type)
-;;   | `->
-;;   | `and
-;;   | `or
-;;   | `⊤
-;;   | `⊥
-;;   | `(,synth ,expr)
-
 (struct stx (loc))
 (define stx/c (struct/c stx srcloc?))
 
@@ -198,152 +168,6 @@
     (struct/c app expr/c expr/c)
     (struct/c ann expr/c type/c)))
 
-(struct env-def (type value)
-  #:methods gen:custom-write
-  ;; TODO: Respect mode here
-  [(define/generic ^write-proc write-proc)
-   (define (write-proc e port mode)
-     (match e
-       [(env-def t _)
-        (write-string ": " port)
-        (^write-proc t port mode)]))])
-;; TODO: Consider making just using env-def bound to the variable itself instead
-;;   Would act sort of like a substitution then?
-(struct env-param (type)
-  #:methods gen:custom-write
-  ;; TODO: Respect mode here
-  [(define/generic ^write-proc write-proc)
-   (define (write-proc e port mode)
-     (match e
-       [(env-param t)
-        (write-string ": " port)
-        (^write-proc t port mode)]))])
-;; A type-env is a dict with identifier? keys and (or/c env-def? env-param? any/c) values
-;; TODO: Make this proper
-(define type-env/c dict?)
-
-(define/contract (type-env->string env)
-  (-> type-env/c string?)
-  (for/fold
-    ([s ""])
-    ([(v t) (in-dict env)])
-    (format "~a~n~a ~a" s (identifier-binding-symbol v) t)))
-
-(define/contract ((canonical/c env type) expr)
-  (-> type-env/c type/c (-> any/c boolean?))
-  (match* (expr type)
-    [((lam (? identifier? x) b) (fun d c))
-      ((canonical/c (dict-set env x (env-param d)) c) b)]
-    [(expr (or (sexpr) (prop)))
-      (do/or-false
-        s <- ((atomic/c env) expr)
-        (return/or-false (type=? s type)))]
-    [(_ _) #f]))
-
-(define/contract ((atomic/c env) expr)
-  (-> type-env/c (-> any/c (or/c #f type/c)))
-  (match expr
-    [(vbl x)
-      (match (dict-ref env x #f)
-       [(env-param t) t]
-       [_ #f])]
-    [(sym _) (sexpr)]
-    [(con c) (constant-type c)]
-    [(equ t) (fun t (fun t (prop)))]
-    [(all t) (fun (fun t (prop)) (prop))]
-    [(exi t) (fun (fun t (prop)) (prop))]
-    [(app f a)
-      (do/or-false
-        t <- ((atomic/c env) f)
-        (match t
-          [(fun d c)
-            (do/or-false
-              ((canonical/c env d) a)
-              (return/or-false c))]
-          [_ #f]))]
-    [_ #f]))
-
-(define (canonical=? a b)
-  ;; (canonical/c env a) (canonical/c env a) -> boolean?
-  (define (canonical=? l env-a env-b a b)
-    ;; natural? (dictof identifier? natural?) (canonical/c env a) (canonical/c env a) -> boolean?
-    (match* (a b)
-      [((lam x a) (lam y b))
-        (canonical=?
-          (+ l 1)
-          (dict-set env-a x l)
-          (dict-set env-b y l)
-          a
-          b)]
-      [((lam _ _) _) #f]
-      [(_ (lam _ _)) #f]
-      [(a b) (atomic=? l env-a env-b a b)]))
-  (define (atomic=? l env-a env-b a b)
-    (match* (a b)
-      [((vbl x) (vbl y)) #:when (and (dict-has-key? env-a x) (dict-has-key? env-b y))
-       (= (dict-ref env-a x) (dict-ref env-b y))]
-      [((vbl x) (vbl y)) (free-identifier=? x y)]
-      [((sym s) (sym t)) (symbol=? s t)]
-      [((con c) (con d)) (symbol=? c d)]
-      [((equ _) (equ _)) #t]
-      [((all _) (all _)) #t]
-      [((exi _) (exi _)) #t]
-      [((app f a) (app g b))
-        (and
-          (atomic=? l env-a env-b f g)
-          (canonical=? l env-a env-b a b))]
-      [(_ _) #f]))
-  (canonical=? 0 (make-immutable-free-id-table) (make-immutable-free-id-table) a b))
-
-#;
-(define (do-app f a)
-  ;; (canonical/c env (fun d c)) (canonical/c env d) -> (canonical/c env c)
-  (match f
-    [(lam x b) (hereditary-subst/n b x a)]))
-
-(define (head-identifier=? a x)
-  ;; (atomic/c env a) identifier? -> boolean?
-  (match a
-    [(app f _) (head-identifier=? f x)]
-    [(vbl y) (free-identifier=? x y)]
-    [_ #f]))
-
-(define (eta-expand t a)
-  ;; (t : type/c) (atomic/c env t) -> (canonical/c env t)
-  (match t
-    [(fun d c)
-     (let ([x (generate-temporary 'x)])
-       (lam x (eta-expand c (app a (eta-expand d x)))))]
-    [t a]))
-
-;; a[x := v]
-(define (hereditary-subst/n a x v)
-  ;; (canonical/c env a) identifier? (canonical/c env b) -> (canonical/c env a)
-  (match a
-    [(lam y b)
-     (lam y (hereditary-subst/n b x v))]
-    [a #:when (head-identifier=? a x)
-     (hereditary-subst/rn a x v)]
-    [a
-     (hereditary-subst/rr a x v)]))
-
-(define (hereditary-subst/rn a x v)
-  ;; (head-identifier=? a x) must be true
-  ;; (atomic/c env a) identifier? (canonical/c env b) -> (canonical/c env a)
-  (match a
-    ;; These are the only two cases since we assume (head-identifier=? a x is true)
-    [(vbl _) v] ;; Since we assume (head-identifier=? a x) is true, this must be x
-    [(app f a)
-      (do-app (hereditary-subst/rn f x v) (hereditary-subst/n a x v))]))
-
-(define (hereditary-subst/rr a x v)
-  ;; (head-identifier=? a x) must be false
-  ;; (atomic/c env a) identifier? (canonical/c env b) -> (atomic/c env a)
-  (match a
-    [(app f a)
-     (app (hereditary-subst/rr f x v) (hereditary-subst/n a x v))]
-    [a a]))
-
 (struct env-val (type value)
   #:methods gen:custom-write
   ;; TODO: Respect mode here
@@ -353,6 +177,17 @@
        [(env-val t _)
         (write-string ": " port)
         (^write-proc t port mode)]))])
+
+;; A type-env is a dict with identifier? keys and (or/c env-val? any/c) values
+;; TODO: Make this proper
+(define type-env/c dict?)
+
+(define/contract (type-env->string env)
+  (-> type-env/c string?)
+  (for/fold
+    ([s ""])
+    ([(v t) (in-dict env)])
+    (format "~a~n~a ~a" s (syntax-e v) t)))
 
 (define/contract ((check/c env t) e)
   (-> type-env/c type/c (-> any/c boolean?))
@@ -460,10 +295,10 @@
   (match* (a b)
     [((? procedure? f) g)
      (let ([x (generate-temporary 'x)])
-       (value=? (do-app f x) (do-app g x)))]
+       (value=? (do-app f (vbl x)) (do-app g (vbl x))))]
     [(f (? procedure? g))
      (let ([x (generate-temporary 'x)])
-       (value=? (do-app f x) (do-app g x)))]
+       (value=? (do-app f (vbl x)) (do-app g (vbl x))))]
     [((vbl x) (vbl y)) (free-identifier=? x y)]
     [((sym s) (sym t)) (symbol=? s t)]
     [((con c) (con d)) (symbol=? c d)]
@@ -478,25 +313,10 @@
   (match v
     [(? procedure? f)
      (let ([x (generate-temporary 'x)])
-       (lam x (f (vbl x))))]
+       (lam x (quote/value (f (vbl x)))))]
     [(app f a)
      (app (quote/value f) (quote/value a))]
     [n n]))
-
-;; TODO: Why even bother reading back into canonical?
-;;   We should just decide equality on values
-; (define (quote/value env v)
-;   ;; (env : type-env/c) (t : type) (value/c env t) -> (canonical/c env t)
-;   (match t
-;     [(fun d c)
-;      (let ([x (generate-temporary 'x)])
-;        (lam x (quote/value (dict-set env x (env-val d x)) c (do-app v x))))]
-;     [t
-; 
-; (define (quote/neu env n)
-;   ;; (env : type-env/c) (neu/c env t) -> (atomic/c env t)
-;   (match n
-;     [(app f a) (app (quote/neu env f) (quote/value env 
 
 (struct expected-but-has static-error (expected has))
 (struct expected-identifier static-error ())
@@ -509,6 +329,7 @@
 (struct invalid-expr static-error ())
 (struct hole-check-type static-error (env expected))
 (struct hole-synth-type static-error (env))
+(struct non-expr-variable static-error (x x-env))
 
 (define type-error/c
   (or/c
@@ -523,7 +344,8 @@
     (struct/c cannot-synth srcloc?)
     (struct/c invalid-expr srcloc?)
     (struct/c hole-check-type srcloc? type-env/c type/c)
-    (struct/c hole-synth-type srcloc? type-env/c)))
+    (struct/c hole-synth-type srcloc? type-env/c)
+    (struct/c non-expr-variable srcloc? identifier? any/c)))
 
 (define/contract (raise-type-error e)
   (-> type-error/c none/c)
@@ -560,8 +382,9 @@
         (format "~a~nBindings in scope:~a"
           (format-static-error e "found hole")
           (type-env->string env)))]
+    [(non-expr-variable loc x x-env)
+     (raise-user-error (format-static-error e "variable ~a is not an expressions. ~a ~a" (syntax-e x) (syntax-e x) x-env))]
     [e (raise-wf-type-error e)]))
-
 
 (define/contract (check-type env e t)
   (->i
@@ -594,12 +417,14 @@
         type-error/c
         (cons/dc [t type/c] [e (t) (check/c env t)]))])
   (match e
-    [(var/stx loc x)
+    [(var/stx loc (? identifier? x))
       (match (dict-ref env x #f)
         [(env-val t _)
          (return/err (cons t (vbl x)))]
         [#f
-         (raise/err (unbound-variable loc))])]
+         (raise/err (unbound-variable loc))]
+        [v
+         (raise/err (non-expr-variable loc x v))])]
      [(hole/stx loc)
        (raise/err (hole-synth-type loc env))]
     [(sym/stx loc s)
@@ -655,13 +480,27 @@
 (struct ∃E/stx stx (∃-proof x-witness x-proof body-proof))
 (struct =I/stx stx ()) ;; Refl
 (struct =E/stx stx (=-proof prop prop-a))
+(struct ->I/stx stx (x prf))
+(struct andI/stx stx (a-prf b-prf))
+(struct ind-sexpr/stx stx (prop empty-prf symbol-prf cons-prf))
 
-(struct ∀I (x x-proof))
+(struct ∀I (x x-proof)
+  #:methods gen:custom-write
+  [(define (write-proc e port mode)
+     (match e
+       [(∀I x prf) (fprintf port "(∀I ~a ~a)" (syntax-e x) prf)]))])
 (struct ∀E (∀-proof expr))
 (struct ∃I (witness witness-proof))
 (struct ∃E (∃-proof x-witness x-proof body-proof))
 (struct =I ()) ;; Refl
 (struct =E (=-proof prop proof-a))
+(struct ->I (x prf))
+(struct andI (a-prf b-prf))
+(struct ind-sexpr (prop empty-prf symbol-prf cons-prf)
+  #:methods gen:custom-write
+  [(define (write-proc e port mode)
+     (match e
+       [(ind-sexpr p empty-prf symbol-prf cons-prf) (fprintf port "(ind-sexpr ~a ~a ~a ~a)" p empty-prf symbol-prf cons-prf)]))])
 
 (define proof/c
   (flat-rec-contract proof/c
@@ -670,7 +509,10 @@
     (struct/c ∃I expr/c proof/c)
     (struct/c ∃E proof/c identifier? identifier? proof/c)
     (struct/c =I)
-    (struct/c =E proof/c expr/c proof/c)))
+    (struct/c =E proof/c expr/c proof/c)
+    (struct/c ->I identifier? proof/c)
+    (struct/c andI proof/c proof/c)
+    (struct/c ind-sexpr expr/c proof/c proof/c proof/c)))
 
 (struct env-prf (prop)
   #:methods gen:custom-write
@@ -679,8 +521,7 @@
    (define (write-proc e port mode)
      (match e
        [(env-prf p)
-        ;; TODO: "⊢" is maybe not the best symbol here? I just want something other than ":" to distinguish objects from proofs
-        (write-string "⊢ " port)
+        (write-string ":: " port)
         (^write-proc p port mode)]))])
 
 ;; A proof-env is a dict with identifier? keys and (or/c env-val? env-thm? any/c) values
@@ -690,13 +531,17 @@
 (struct doesnt-prove static-error (prop))
 (struct objs-not-equal static-error (a b prop))
 (struct hole-check-proof static-error (env prop))
+(struct expected-but-proves static-error (expected proves))
+(struct invalid-proof static-error ())
 
 (define proof-error/c
   (or/c
     type-error/c
     (struct/c doesnt-prove srcloc? any/c #|(value/c env (prop))|#)
     (struct/c objs-not-equal srcloc? any/c any/c #|(value/c env t)|# any/c #|(value/c env (prop))|#)
-    (struct/c hole-check-proof srcloc? type-env/c any/c)))
+    (struct/c hole-check-proof srcloc? type-env/c any/c #|(value/c env (prop))|#)
+    (struct/c expected-but-proves srcloc? any/c any/c #|(value/c env (prop))|#)
+    (struct/c invalid-proof srcloc?)))
 
 (define/contract (raise-proof-error e)
   (-> proof-error/c none/c)
@@ -710,6 +555,10 @@
         (format "~a~nBindings in scope:~a"
           (format-static-error e "found hole when trying to prove ~a" (quote/value prop))
           (type-env->string env)))]
+    [(expected-but-proves loc expected proves)
+     (raise-user-error (format-static-error e "expected a proof of ~a, but instead proves ~a" (quote/value expected) (quote/value proves)))]
+    [(invalid-proof loc)
+     (raise-user-error (format-static-error e "invalid proof"))]
     [e (raise-type-error e)]))
 
 (define/contract ((proves-check/c env p) proof)
@@ -726,7 +575,42 @@
        ((proves-check/c env (do-app p w)) proof))]
     [((=I) (app (app (equ t) a) b))
      (value=? a b)]
-    [(_ _) #f]))
+    [((->I x prf) (app (app (con '->) a) b))
+     ((proves-check/c (dict-set env x (env-prf a)) b) prf)]
+    [((andI a-prf b-prf) (app (app (con 'and) a) b))
+     (and ((proves-check/c env a) a-prf) ((proves-check/c env b) b-prf))]
+    [(prf p)
+     (do/or-false
+       q <- ((proves-synth/c env) prf)
+       (value=? p q))]))
+
+(define/contract ((proves-synth/c env) prf)
+  (->i
+    ([env proof-env/c])
+    [res (env)
+      (->i
+        ([prf any/c])
+        [res (prf) (or/c #f (value/c env (prop)))])])
+  (match prf
+    [(vbl (? identifier? x))
+     (match (dict-ref env x #f)
+       [(env-prf p) p]
+       [_ #f])]
+    [(ind-sexpr p empty-prf symbol-prf cons-prf)
+     (do/or-false
+       ((check/c env (fun (sexpr) (prop))) p)
+       let p-v = (eval/check env (fun (sexpr) (prop)) p)
+       ((proves-check/c env (do-app p-v (con 'empty))) empty-prf)
+       ((proves-check/c env (app (all (sexpr)) (λ (s) (app (app (con '->) (app (con 'symbol?) s)) (do-app p-v s))))) symbol-prf)
+       ((proves-check/c env
+          (app (all (sexpr))
+            (λ (a) (app (all (sexpr))
+              (λ (b)
+                (app (app (con '->) (app (app (con 'and) (do-app p-v a)) (do-app p-v b)))
+                  (do-app p-v (app (app (con 'cons) a) b))))))))
+        cons-prf)
+       (return/or-false (app (all (sexpr)) (λ (s) (do-app p-v s)))))]
+    [_ #f]))
 
 (define/contract (check-proof env prf p)
   (->i
@@ -755,8 +639,61 @@
        (raise/err (objs-not-equal loc a b p)))]
     [((=I/stx loc) p)
      (raise/err (doesnt-prove loc p))]
+    [((->I/stx loc (? identifier? x) prf-stx) (app (app (con '->) d) c))
+     (do/err
+       prf <- (check-proof (dict-set env x (env-prf d)) prf-stx c)
+       (return/err (->I x prf)))]
+    [((->I/stx loc (? identifier? _) _) p)
+     (raise/err (doesnt-prove loc p))]
+    [((andI/stx _ a-prf-stx b-prf-stx) (app (app (con 'and) a) b))
+     (do/err
+       a-prf <- (check-proof env a-prf-stx a)
+       b-prf <- (check-proof env b-prf-stx b)
+       (return/err (andI a-prf b-prf)))]
+    [((andI/stx loc _ _) p)
+     (raise/err (doesnt-prove loc p))]
     [((hole/stx loc) p)
-     (raise/err (hole-check-proof loc env p))]))
+     (raise/err (hole-check-proof loc env p))]
+    [(prf-stx p)
+     (do/err
+       (cons q prf) <- (synth-proof env prf-stx)
+       (if (value=? p q)
+         (return/err prf)
+         (raise/err (expected-but-proves (stx-loc prf-stx) p q))))]))
+
+(define/contract (synth-proof env prf)
+  (->i
+    ([env type-env/c]
+     [e stx/c])
+    [result (env e)
+      (err/c
+        proof-error/c
+        (cons/dc [p (value/c env (prop))] [e (p) (proves-check/c env p)]))])
+  (match prf
+    [(var/stx loc (? identifier? x))
+     (match (dict-ref env x #f)
+       [(env-prf p) (return/err (cons p (vbl x)))])]
+    [(ind-sexpr/stx loc p-stx empty-prf-stx symbol-prf-stx cons-prf-stx)
+     (do/err
+       p <- (check-type env p-stx (fun (sexpr) (prop)))
+       let p-v = (eval/check env (fun (sexpr) (prop)) p)
+       empty-prf <- (check-proof env empty-prf-stx (do-app p-v (con 'empty)))
+       symbol-prf <- (check-proof env symbol-prf-stx (app (all (sexpr)) (λ (s) (app (app (con '->) (app (con 'symbol?) s)) (do-app p-v s)))))
+       cons-prf <-
+         (check-proof
+           env
+           cons-prf-stx
+           (app (all (sexpr))
+             (λ (a) (app (all (sexpr))
+               (λ (b)
+                 (app (app (con '->) (app (app (con 'and) (do-app p-v a)) (do-app p-v b)))
+                   (do-app p-v (app (app (con 'cons) a) b))))))))
+       (return/err
+         (cons
+           (app (all (sexpr)) (λ (s) (do-app p-v s)))
+           (ind-sexpr p empty-prf symbol-prf cons-prf))))]
+    [(stx loc)
+     (raise/err (invalid-proof loc))]))
 
 (struct def/stx stx (x t e))
 (struct def-prf/stx stx (x p e))
@@ -838,499 +775,3 @@
                (dict-set env x (env-prf p))
                (append defs (list d))
                defs-stx)]))])))
-
-#|
-(define/contract (subst e x a)
-  (-> expr? variable? expr? expr?)
-  (match e
-    [`(λ ,y ,b)
-      (let ([z (gensym)])
-        `(λ ,z ,(subst (subst b y z) x a)))]
-    [(? variable? y) #:when (symbol=? x y)
-      a]
-    [(? variable? y) y]
-    [`cons e]
-    [`(quote ,_) e]
-    [`() e]
-    [`symbol? e]
-    [`pair? e]
-    [`empty? e]
-    [`(= ,_) e]
-    [`(∀ ,_) e]
-    [`(∃ ,_) e]
-    [`-> e]
-    [`and e]
-    [`or e]
-    [`(,f ,arg)
-      (app (subst f x a) (subst arg x a))]))
-
-(define/contract (app f a)
-  (-> expr? expr? expr?)
-  (match f
-    [`(λ ,x ,b)
-      (subst b x a)]
-    [f `(,f ,a)]))
-
-(define/contract (app* f arg . args)
-  (->* (expr? expr?) #:rest expr? expr?)
-  (match args
-    [`() (app f arg)]
-    [`(,next-arg ,args ...)
-      (apply app* (app f arg) next-arg args)]))
-
-(define/contract (expr=? a b)
-  (-> expr? expr? boolean?)
-  (match* (a b)
-    [(`(λ ,_ ,_) _)
-     (let ([x (gensym)])
-       (expr=? (app a x) (app b x)))]
-    [(_ `(λ ,_ ,_))
-     (let ([x (gensym)])
-       (expr=? (app a x) (app b x)))]
-    [((? variable? x) (? variable? y)) (symbol=? x y)]
-    [(`cons `cons) #t]
-    [(`(quote ,s) `(quote ,t))
-     (symbol=? s t)]
-    [(`() `()) #t]
-    [(`symbol? `symbol?) #t]
-    [(`pair? `pair?) #t]
-    [(`empty? `empty?) #t]
-    [(`(= ,t) `(= ,u)) (type=? t u)]
-    [(`(= ,t) _) #f]
-    [(_ `(= ,u)) #f]
-    [(`(∀ ,t) `(∀ ,u)) (type=? t u)]
-    [(`(∀ ,t) _) #f]
-    [(_ `(∀ ,u)) #f]
-    [(`(∃ ,t) `(∃ ,u)) (type=? t u)]
-    [(`(∃ ,t) _) #f]
-    [(_ `(∃ ,u)) #f]
-    [(`-> `->) #t]
-    [(`and `and) #t]
-    [(`or `or) #t]
-    [(`⊤ `⊤) #t]
-    [(`⊥ `⊥) #t]
-    [(`(,a-f ,a-arg) `(,b-f ,b-arg))
-     (and (expr=? a-f b-f) (expr=? a-arg b-arg))]))
-
-;; type-env ::= (dictof symbol? type?)
-
-(define (type-env? env)
-  (dict? env))
-
-;;
-;; [,type-env |- ,expr : ,t]
-;;
-;; ,(dict-ref Γ x) = ,t
-;; -------------------- var
-;; ,Γ |- ,x : ,t
-;; 
-;;
-
-(define/contract (type-check env e t)
-  (-> type-env? expr? type? boolean?)
-  (match* (e t)
-    [(`(λ ,x ,b) `(fun ,d ,c))
-     (type-check (dict-set env x d) b c)]
-    [(`(λ ,_ ,_) _) #f]
-    [(e t) (equal? t (type-synth env e))]))
-
-(define/contract (type-synth env e)
-  (-> type-env? expr? (or/c type? #f))
-  (match e
-    [(? variable? x) (dict-ref env x #f)]
-    [`cons `(fun sexpr (fun sexpr sexpr))]
-    [`(quote ,_) `sexpr]
-    [`() `sexpr]
-    [`symbol? `(fun sexpr prop)]
-    [`pair? `(fun sexpr prop)]
-    [`empty? `(fun sexpr prop)]
-    [`(= ,t) `(fun ,t (fun ,t prop))]
-    [`(∀ ,t) `(fun (fun ,t prop) prop)]
-    [`(∃ ,t) `(fun (fun ,t prop) prop)]
-    [`-> `(fun prop (fun prop prop))]
-    [`and `(fun prop (fun prop prop))]
-    [`or `(fun prop (fun prop prop))]
-    [`⊤ `prop]
-    [`⊥ `prop]
-    [`(,f ,arg)
-      (match (type-synth env f)
-        [`(fun ,d ,c)
-          (and (type-check env arg d) c)]
-        [_ #f])]))
-
-;; proof ::=
-;;   | check-proof?
-;;   | synth-proof?
-;;
-;; check-proof? ::=
-;;   | (∀I ,variable? ,proof)
-;;   | (∃I ,expr ,proof)
-;;   | (->I ,variable? ,proof?)
-;;   | (andI ,proof ,proof)
-;;   | (orI-L ,proof)
-;;   | (orI-R ,proof)
-;;   | (⊤I)
-;;   | _
-;;
-;; synth-proof? ::=
-;;   | variable?
-;;   | (ind-sexpr ,expr ,proof ,proof ,proof)
-;;   | (∀E ,proof ,expr)
-;;   | (∃E (,symbol? ,symbol?) ,proof ,proof)
-;;   | (->E ,proof ,proof)
-;;   | (andE-L ,proof)
-;;   | (andE-R ,proof)
-;;   | (orE ,proof (,variable? ,proof) (,variable? ,proof?))
-;;   | (⊥E ,expr ,proof)
-
-(define (proof? p)
-  (match p
-    [(? variable?) #t]
-    #;
-    [`(ind-sexpr ,prop-expr ,empty-p ,sym-p ,pair-p)
-      (and (expr? prop-expr) (proof? empty-p) (proof? sym-p) (proof? pair-p))]
-    [`(∀I ,x ,p)
-      (and (variable? x) (proof? p))]
-    [`(∀E ,p ,e)
-      (and (proof? p) (expr? e))]
-    [`(∃I ,e ,p)
-      (and (expr? e) (proof? p))]
-    [`(∃E (,x ,x-prf) ,exists-p ,p)
-      (and (variable? x) (variable? x-prf) (proof? exists-p) (proof? p))]
-    [`(->I ,x ,p)
-      (and (variable? x) (proof? p))]
-    [`(->E ,imp-p ,prec-p)
-      (and (proof? imp-p) (proof? prec-p))]
-    [`(andI ,l-p ,r-p)
-      (and (proof? l-p) (proof? r-p))]
-    [`(andE-L ,p)
-      (proof? p)]
-    [`(andE-R ,p)
-      (proof? p)]
-    [`(orI-L ,p)
-      (proof? p)]
-    [`(orI-R ,p)
-      (proof? p)]
-    [`(orE ,or-p (,x ,l-p) (,y ,r-p))
-      (and (proof? or-p) (variable? x) (proof? l-p) (variable? y) (proof? r-p))]
-    [`(⊤I) #t]
-    [`(⊥E ,prop ,p)
-      (and (expr? prop) (proof? p))]
-    [`(=E ,=prf ,p ,p-a)
-      (and (proof? =prf) (expr? p) (proof? p-a))]
-    [`_ #t]
-    [_ #f]))
-
-;; proof-env ::= (dictof variable? expr?)
-
-(define (proof-env? env)
-  (dict? env))
-
-;; [,type-env | ,proof-env |- ,proof : ,expr]
-;; 
-;; ,(dict-ref Θ x) = ,p
-;; -------------------- var
-;; ,Γ | ,Θ |- ,x : ,p
-;;
-;; ,Γ |- ,p : (fun sexpr prop)
-;; ,Γ | ,Θ |- ,empty : (,p `())
-;; ,Γ | ,Θ |- ,sym : ((∀ sexpr) (λ x (-> (symbol? x) (,p x))))
-;; ,Γ | ,Θ |- ,pair : ((∀ sexpr) (λ x ((∀ sexpr) (λ y (-> (and (,p x) (,p y)) (,p (cons ,x ,y)))))))
-;; ------------------------------------------- ind-sexpr
-;; ,Γ | ,Θ |- (ind-sexpr ,p ,empty ,sym ,pair) : ((∀ sexpr) ,p)
-;;
-;; ,(dict-set Γ x t) | ,Θ |- ,b : (,p ,x)
-;; -------------------------------------- ∀I
-;; ,Γ | ,Θ |- (∀I ,x ,b) : ((∀ ,t) ,p)
-;;
-;; ,Γ | ,Θ |- ,prf : ((∀ ,t) ,p)
-;; ,Γ |- ,e : ,t
-;; --------------------------------- ∀E
-;; ,Γ | ,Θ |- (∀E ,prf ,e) : (,p ,e)
-;;
-;; ,Γ |- ,e : ,t
-;; ,Γ | ,Θ |- ,prf : (,p ,e)
-;; -------------------------------------
-;; ,Γ | ,Θ |- (∃I ,e ,prf) : ((∃ ,t) ,p)
-;;
-;; ,Γ | ,Θ |- ,exists-p : ((∃ ,t) ,p)
-;; ,(dict-set Γ x t) | ,(dict-set Θ x-prf `(,p ,x)) |- ,b : ,q
-;; -----------------------------------------------------------
-;; ,Γ | ,Θ |- (∃E (,x ,x-prf) ,exists-p ,b) : ,q
-
-(define/contract (proof-check type-env proof-env prf prop)
-  (-> type-env? proof-env? proof? expr? boolean?)
-  (match* (prf prop)
-    [(`(∀I ,x ,b) `((∀ ,t) ,p))
-     (proof-check (dict-set type-env x t) proof-env b (app p x))]
-    [(`(∀I ,_ ,_) _) #f]
-    [(`(∃I ,e ,prf) `((∃ ,t) ,p))
-     (and
-       (type-check type-env e t)
-       (proof-check type-env proof-env prf (app p e)))]
-    [(`(∃I ,_ ,_) _) #f]
-    [(`(∃E (,x ,x-p) ,exists-p ,b) prop)
-     (match (proof-synth type-env proof-env exists-p)
-       [`((∃ ,t) ,p)
-         (proof-check (dict-set type-env x t) (dict-set proof-env x-p (app p x)) b prop)]
-       [_ #f])]
-    [(`(->I ,x ,prf) `((-> ,A) ,B))
-     (proof-check type-env (dict-set proof-env x A) prf B)]
-    [(`(->I ,_ ,_) _) #f]
-    [(`(andI ,a ,b) `((and ,A) ,B))
-     (and (proof-check type-env proof-env a A) (proof-check type-env proof-env b B))]
-    [(`(orI-L ,a) `((or ,A) ,_))
-     (proof-check type-env proof-env a A)]
-    [(`(orI-R ,b) `((or ,_) ,B))
-     (proof-check type-env proof-env b B)]
-    [(`(orE ,or-p (,x ,l-p) (,y ,r-p)) prop)
-     (match (proof-synth type-env proof-env or-p)
-       [`(or ,A ,B)
-         (and
-           (proof-check type-env (dict-set proof-env x A) l-p prop)
-           (proof-check type-env (dict-set proof-env y B) r-p prop))]
-       [_ #f])]
-    [(`(⊤I) `⊤) #t]
-    [(`(⊤I) _) #f]
-    [(`_ prop) (error `proof-hole "~n~a~n~n~a~n~n_ : ~a" (dict->list type-env) (dict->list proof-env) prop)]
-    [(prf prop)
-     (cond
-       [(proof-synth type-env proof-env prf)
-        fun
-        (λ (synthed-prop) (expr=? prop synthed-prop))]
-       [else #f])]))
-
-(define/contract (proof-synth type-env proof-env prf)
-  (-> type-env? proof-env? proof? (or/c expr? #f))
-  (match prf
-    [(? variable? x) (dict-ref proof-env x #f)]
-    #;
-    [`(ind-sexpr ,p ,empty-p ,sym-p ,pair-p)
-      (and 
-        (type-check type-env p `(fun sexpr prop))
-        (proof-check type-env proof-env empty-p (app p `()))
-        (let ([x (gensym)])
-          (proof-check type-env proof-env sym-p `((∀ sexpr) (λ ,x ((-> (symbol? ,x)) ,(app p x))))))
-        (let ([x (gensym)] [y (gensym)])
-          (proof-check type-env proof-env empty-p `((∀ sexpr) (λ ,x ((∀ sexpr) (λ ,y ((-> ((and ,(app p x)) ,(app p y))) ,(app p `((cons ,x) ,y)))))))))
-        `((∀ sexpr) ,p))]
-    [`(∀E ,forall-p ,e)
-      (match (proof-synth type-env proof-env forall-p)
-        [`((∀ ,t) ,p)
-          (and
-            (type-check type-env e t)
-            (app p e))]
-        [_ #f])]
-    [`(∃E (,x ,x-p) ,exists-p ,b)
-     (match (proof-synth type-env proof-env exists-p)
-       [`((∃ ,t) ,p)
-         (proof-synth (dict-set type-env x t) (dict-set proof-env x-p (app p x)) b)]
-       [_ #f])]
-    [`(->E ,imp-p ,prec-p)
-      (match (proof-synth type-env proof-env imp-p)
-        [`((-> ,A) ,B)
-          (and
-            (proof-check type-env proof-env prec-p A)
-            B)]
-        [_ #f])]
-    [`(andE-L ,p)
-      (match (proof-synth type-env proof-env p)
-        [`((and ,A) ,_) A]
-        [_ #f])]
-    [`(andE-R ,p)
-      (match (proof-synth type-env proof-env p)
-        [`((and ,_) ,B) B]
-        [_ #f])]
-    [`(orE ,or-p (,x ,l-p) (,y ,r-p))
-     (match (proof-synth type-env proof-env or-p)
-       [`((or ,A) ,B)
-         (let
-           ([l-prop (proof-synth type-env (dict-set proof-env x A) l-p)]
-            [r-prop (proof-synth type-env (dict-set proof-env y B) r-p)])
-           (and
-             l-prop
-             r-prop
-             (expr=? l-prop r-prop)
-             l-prop))]
-       [_ #f])]
-    [`(=E ,=prf ,p ,p-a)
-      (match (proof-synth type-env proof-env =prf)
-        [`(((= ,t) ,a) ,b)
-          (and
-            (type-check type-env p `(fun ,t prop))
-            (proof-check type-env proof-env p-a (app p a))
-            (app p b))]
-        [_ #f])]
-    [`(⊥E ,prop ,p)
-      (and
-        (type-check type-env prop `prop)
-        (proof-check type-env proof-env p `⊥)
-        prop)]
-    [_ #f]))
-
-(define (realizer-expr-env? env)
-  (dict? env))
-
-(define (realizer-proof-env? env)
-  (dict? env))
-
-(define/contract (realizer/proof expr-env proof-env prf)
-  (-> realizer-expr-env? realizer-proof-env? proof? any/c)
-  (match prf
-    [`(∀I ,x ,b)
-      (λ (x-realizer)
-        (realizer/proof (dict-set expr-env x x-realizer) proof-env b))]
-    [`(∃I ,e ,b)
-      (cons (realizer/expr expr-env e) (realizer/proof expr-env proof-env b))]
-    [`(->I ,x ,b)
-      (λ (x-realizer)
-        (realizer/proof expr-env (dict-set proof-env x x-realizer) b))]
-    [`(andI ,a ,b)
-      (cons (realizer/proof expr-env proof-env a) (realizer/proof expr-env proof-env b))]
-    [`(orI-L ,a)
-      `(left ,(realizer/proof expr-env proof-env a))]
-    [`(orI-R ,b)
-      `(right, (realizer/proof expr-env proof-env b))]
-    [(? variable? x)
-      (dict-ref proof-env x)]
-    #;
-    [`(ind-sexpr ,p ,empty-p ,sym-p ,cons-p)
-     (let
-       ([p-r (realizer/expr expr-env p)]
-        [empty-r (realizer/proof expr-env proof-env empty-p)]
-        [sym-r (realizer/proof expr-env proof-env sym-p)]
-        [cons-r (realizer/proof expr-env proof-env cons-p)])
-       (λ (e-r)
-         (let loop ([r e-r])
-           (match r
-             [(? empty?) empty-r]
-             [(? symbol? s) ((sym-r s) (void))]
-             [(cons a b) (((cons-r a) b) (cons (loop a) (loop b)))]))))]
-    [`(∀E ,p ,e)
-      ((realizer/proof expr-env proof-env p) (realizer/expr expr-env e))]
-    [`(∃E (,x ,x-prf) ,p ,b)
-      (match (realizer/proof expr-env proof-env p)
-        [(cons e e-r)
-         (realizer/proof (dict-set expr-env x e) (dict-set proof-env x-prf e-r) b)])]
-    [`(->E ,f ,a)
-      ((realizer/proof expr-env proof-env f) (realizer/proof expr-env proof-env a))]
-    [`(andE-L ,p)
-      (match (realizer/proof expr-env proof-env p)
-        [(cons a _) a])]
-    [`(andE-R ,p)
-      (match (realizer/proof expr-env proof-env p)
-        [(cons _ b) b])]
-    [`(orE ,p (,x ,p-l) (,y ,p-r))
-      (match (realizer/proof expr-env proof-env p)
-        [`(left ,l)
-          (realizer/proof expr-env (dict-set proof-env x l) p-l)]
-        [`(right ,r)
-          (realizer/proof expr-env (dict-set proof-env y r) p-r)])]
-    [`(⊤I) `()]
-    [`(⊥E ,_ ,_) (error "should be impossible")]))
-
-(define/contract (realizer/expr expr-env e)
-  (-> realizer-expr-env? expr? any/c)
-  (match e
-    [`(λ ,x ,b)
-      (λ (x-v) (realizer/expr (dict-set expr-env x x-v)))]
-    [(? variable? x)
-      (dict-ref expr-env x)]
-    [`cons
-      (λ (a) (λ (b) (cons a b)))]
-    [`(quote ,s) s]
-    [`() `()]
-    [`symbol? (λ (_) (void))]
-    [`pair? (λ (_) (void))]
-    [`empty? (λ (_) (void))]
-    [`(= ,t) (λ (_) (λ (_) (void)))]
-    [`(∀ ,t) (λ (_) (λ (_) (void)))]
-    [`(∃ ,t) (λ (_) (λ (_) (void)))]
-    [`-> (λ (_) (λ (_) (void)))]
-    [`and (λ (_) (λ (_) (void)))]
-    [`or (λ (_) (λ (_) (void)))]
-    [`⊤ (void)]
-    [`⊥ (void)]
-    [`(,f ,arg ,args ...)
-      (let
-        ([f-r (realizer/expr expr-env f)]
-         [arg-r (realizer/expr expr-env arg)]
-         [args-rs (map (λ (arg) (realizer/expr expr-env arg)) args)])
-        (let loop ([f f-r] [arg arg-r] [args args-rs])
-          (match args
-           [`() (f arg)]
-           [`(,next-arg ,args ...)
-             (loop (f arg) next-arg args)])))]))
-
-(define default-proof-check-env
-  (hash
-    `sexpr-ind
-    `((∀ (fun sexpr prop))
-       (λ P
-         ((->
-           ((and
-             (P ()))
-             ((and
-               ((∀ sexpr) (λ s ((-> (symbol? s)) (P s)))))
-               ((∀ sexpr) (λ a ((∀ sexpr) (λ b ((-> ((and (P a)) (P b))) (P ((cons a) b))))))))))
-           ((∀ sexpr) (λ a (P a))))))
-    `empty-refl `(((= sexpr) ()) ())
-    `symbol-refl `((∀ sexpr) (λ s ((-> (symbol? s)) (((= sexpr) s) s))))
-    `cons-refl `((∀ sexpr) (λ a ((∀ sexpr) (λ b (((= sexpr) ((cons a) b)) ((cons a) b))))))))
-
-(define default-proof-realizer-env
-  (hash
-    `sexpr-ind
-    (λ (p)
-      (λ (cases)
-        (λ (e)
-          (match e
-            [`() (car cases)]
-            [(? symbol? s) (((cadr cases) s) (void))]
-            [(cons a b) ((((cddr cases) a) b) (cons (void) (void)))]))))
-    `empty-refl (void)
-    `symbol-refl (λ (s) (λ (s-prf) (void)))))
-
-(module+ test
-  (require rackunit)
-
-  (define p0 `((∀ prop) (λ X ((-> X) X))))
-  (check-true (expr? p0))
-  (check-true (type-check (hash) p0 `prop))
-
-  (define prf0 `(∀I X (->I X-prf X-prf)))
-  (check-true (proof? prf0))
-  (check-true (proof-check (hash) (hash) prf0 p0))
-
-  (define p1 `((-> ((∃ sexpr) (λ x (((= sexpr) x) x)))) ((∃ sexpr) (λ x (((= sexpr) x) x)))))
-  (check-true (expr? p1))
-  (check-true (type-check (hash) p0 `prop))
-
-  (define prf1
-    `(->I x-exists
-       (∃E (x x-refl) x-exists
-         (∃I x x-refl))))
-  (check-true (proof? prf1))
-  (check-true (proof-check (hash) (hash) prf1 p1))
-
-  (check-false (proof-check (hash) (hash) prf0 p1))
-
-  (define r1 (realizer/proof (hash) (hash) prf1))
-
-  (check-equal? (r1 (cons (cons 'a 'b) (void))) (cons (cons 'a 'b) (void)))
-
-  (check-exn exn:fail? (λ () (proof-check (hash) (hash) `_ `⊤)))
-
-  (define sexpr-refl `((∀ sexpr) (λ x (((= sexpr) x) x))))
-  (check-true (expr? sexpr-refl))
-  (check-true (type-check (hash) sexpr-refl `prop))
-
-  (define sexpr-refl-prf
-    `(->E (∀E sexpr-ind (λ e (((= sexpr) e) e))) (andI empty-refl (andI symbol-refl (∀I a (∀I b (->I ab-refl (∀E (∀E cons-refl a) b))))))))
-  (check-true (proof? sexpr-refl-prf))
-  (check-true (proof-check (hash) default-proof-check-env sexpr-refl-prf sexpr-refl))
-
-  (check-true (expr? `⊤))
-  (check-true (type-check (hash) `⊤ `prop))
-)
-|#
