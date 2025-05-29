@@ -124,8 +124,13 @@
 (define-syntax ->-expr
   (mk-constant (λ (loc) (con/stx loc `->))))
 
-(define-syntax and-expr
+(define-syntax and-con
   (mk-constant (λ (loc) (con/stx loc `and))))
+
+(define-syntax and-expr
+  (syntax-rules ()
+    [(_ a-stx b-stx) (app-helper (app-helper and-con a-stx) b-stx)]
+    [(_ a-stx b-stx ...) (app-helper (app-helper and-con a-stx) (and-expr b-stx ...))]))
 
 (define-syntax or-expr
   (mk-constant (λ (loc) (con/stx loc `or))))

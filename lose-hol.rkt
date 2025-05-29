@@ -374,12 +374,12 @@
       (raise-user-error (format-static-error e "invalid expression"))]
     [(hole-check-type loc env expected)
       (raise-user-error
-        (format "~a~nBindings in scope:~a"
+        (format "~a~nVariables in scope:~a"
           (format-static-error e "found hole with expected type ~a" expected)
           (type-env->string env)))]
     [(hole-synth-type loc env)
       (raise-user-error
-        (format "~a~nBindings in scope:~a"
+        (format "~a~nVariables in scope:~a"
           (format-static-error e "found hole")
           (type-env->string env)))]
     [(non-expr-variable loc x x-env)
@@ -552,7 +552,7 @@
      (raise-user-error (format-static-error e "failed to prove ~a since ~a and ~a are not equal" p a b))]
     [(hole-check-proof loc env prop)
       (raise-user-error
-        (format "~a~nBindings in scope:~a"
+        (format "~a~nVariables in scope:~a"
           (format-static-error e "found hole when trying to prove ~a" (quote/value prop))
           (type-env->string env)))]
     [(expected-but-proves loc expected proves)
